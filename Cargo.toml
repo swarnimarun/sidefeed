@@ -1,0 +1,28 @@
+[package]
+name = "sidefeed"
+version = "0.1.0"
+edition = "2021"
+authors = ["Swarnim Arun <swarnimarun11@gmail.com>"]
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix = "0.13.1"
+actix-rt = "2.9.0"
+actix-web = { version = "4.4.0", features = ["rustls"] }
+actix-web-lab = "0.19.1"
+env_struct = "0.1.4"
+error-stack = "0.4.1"
+futures-util = "0.3.28"
+log = "0.4.20"
+pretty_env_logger = "0.5.0"
+rss = { version = "2.0.6", features = ["atom", "validation", "serde", "with-serde"] }
+serde = { version = "1.0.188", features = ["derive"] }
+sqlx = { version = "0.7.1", features = ["time", "uuid", "tls-rustls", "runtime-tokio-rustls", "sqlite"] }
+tokio = {version = "1.32.0", features = ["full"]}
+
+[features]
+default = ["sqlx/sqlite"]
+# not supported atm but plans to support external dbs
+# postgres = ["sqlx/postgres"]
