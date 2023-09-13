@@ -1,5 +1,7 @@
 mod api;
+mod db;
 mod errors;
+mod models;
 
 use env_struct::env_struct;
 use error_stack::{Report, Result, ResultExt};
