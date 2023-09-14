@@ -3,11 +3,6 @@
 Simple aggregation service that takes links, as URLs and converts said URLs into a combined feed.
 This allows for unified feeds and works agnostic to frontends.
 
-## frontends for project
-
-- example, [svelte-feeds](https://github.com/swarnimarun/svelte-feeds)
-- example, [dioxus-feeds](https://github.com/swarnimarun/dioxus-feeds)
-
 ## Features
 
 - Support for RSS(atom, v1 & v2) urls.
