@@ -18,6 +18,8 @@ This allows for unified feeds and works agnostic to frontends.
 - Support mass URL imports.
 - Support OPML imports.
 - Provide live-connection for feed updates(server-sent events).
+- Add caching for feeds to db.
+- Add search in cached feeds support, with sqlite full text search.
 - Support fediverse, and aggregation on hashtags.
 - Support websockets for api.
 - Add web-scraping for feed aggregation.
@@ -34,5 +36,3 @@ This allows for unified feeds and works agnostic to frontends.
 
 Swarnim Arun<br/>
 Email Me At: swarnimarun11"at"gmail"dot"com
-
-Feel free to support the development of the service by using my Github Sponsors or [Kofi link]().
