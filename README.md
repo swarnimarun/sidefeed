@@ -1,4 +1,4 @@
-# sidefeed
+# sidefeed (WIP)
 
 Simple aggregation service that takes links, as URLs and converts said URLs into a combined feed.
 This allows for unified feeds and works agnostic to frontends.
@@ -12,12 +12,12 @@ This allows for unified feeds and works agnostic to frontends.
 
 - Support for RSS(atom, v1 & v2) urls.
 - Provide a HTTP REST API.
-- Provide live-connection for feed updates(server-sent events).
-- Support mass URL imports.
 
 ## Roadmap
 
+- Support mass URL imports.
 - Support OPML imports.
+- Provide live-connection for feed updates(server-sent events).
 - Support fediverse, and aggregation on hashtags.
 - Support websockets for api.
 - Add web-scraping for feed aggregation.

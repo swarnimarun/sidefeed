@@ -15,7 +15,7 @@ use actix_web::{
 
 use crate::{
     api::{
-        fetch::get_feed,
+        fetch::get_feed_whole,
         update::{add_feed_source, edit_feed_source, remove_feed_source},
     },
     errors::ApplicationError,
@@ -27,32 +27,42 @@ env_struct! {
     }
 }
 
+/// handle all unknown requests for now, NOT_FOUND(404) for all,
 async fn handle_unknown() -> impl Responder {
+    // TODO(swarnim):
+    // consider providing suggestions for miss-spellings eg, /feeds vs /feed
     HttpResponse::NotFound()
 }
 
 #[actix_web::main]
 async fn main() -> Result<(), ApplicationError> {
+    // setup env and logging
     let env = ApplicationEnv::load_from_env();
-    if matches!(env.log.to_lowercase().as_str(), "true" | "yes" | "ok") {
+    if matches!(env.log.to_lowercase().as_str(), "true" | "yes" | "on") {
         formatted_builder()
-            // by default enable all logs as Trace >= ALL
-            // before deploying consider setting this to OFF
-            .filter_level(log::LevelFilter::Trace)
+            // TODO(swarnim): before deploying consider setting this to OFF
+            // users can manually set LOG=off for the time being
+            .filter_level(log::LevelFilter::Debug)
             .parse_default_env()
             .try_init()
             .change_context(ApplicationError::UnexpectedError(
                 "Intialized logging twice.",
             ))?;
     }
+
+    // setup db and wrap in shareable handler Arc
+    let db = std::sync::Arc::new(db::AppDB::try_build_pool("sqlite://db/sqlite.db").await?);
+
+    // startup the server with the actix app
     const ADDR: (&str, u16) = ("127.0.0.1", 3000);
     println!("Listening on http://{}:{}", ADDR.0, ADDR.1);
-    HttpServer::new(|| {
+    HttpServer::new(move || {
         App::new()
             // send shared sqlx db connection pool
-            .app_data(0)
+            // TODO(swarnim): consider providing tracing middleware
+            .app_data(web::Data::new(db.clone()))
             .wrap(Logger::default())
-            .service(get_feed)
+            .service(get_feed_whole)
             .service(add_feed_source)
             .service(remove_feed_source)
             .service(edit_feed_source)

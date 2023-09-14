@@ -7,10 +7,10 @@ CREATE TABLE IF NOT EXISTS urls (
 
 CREATE TABLE IF NOT EXISTS feeds (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-   	url TEXT,
+   	url TEXT NOT NULL,
     last_checked TEXT NOT NULL,
     last_modified TEXT NOT NULL,
-	CONSTRAINT conts_url
+	CONSTRAINT fk_url
 		FOREIGN KEY (url)
 		REFERENCES urls(url)
 		ON DELETE CASCADE

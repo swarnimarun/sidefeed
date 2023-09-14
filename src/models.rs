@@ -15,23 +15,11 @@ pub struct FeedSource {
     /// feed name
     pub name: String,
     /// id to urls
-    pub url: UrlId,
+    pub url: (String, UrlType),
     /// store time for last checked
     pub last_checked: String,
     /// last modified
     pub last_modified: String,
-}
-
-pub type UrlId = usize;
-
-/// [`Urls`]: is a table with a URL and a Type specifying how the URL should be parsed.
-/// ## why?
-/// simplifies handling for multiple sources for building the feed.
-pub type Urls = HashMap<String, UrlInfo>;
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UrlInfo {
-    /// store the url type, default to Rss if not provided
-    pub url_type: UrlType,
 }
 
 /// [`UrlType`]: useful for identifying amongst url feed source types, like rss vs fediverse
