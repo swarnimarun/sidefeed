@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT url FROM feeds WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "url",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2cc36edd19fec9cbb474e49c7de9f66efc7d055697399e1829df91cb9e0807cd"
+}

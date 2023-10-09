@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE feeds SET url = ?, last_checked = ?, last_modified = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "46f98358cfd5ea4d50791b837bc7e244162e156161a48da765ed3fd9d8277bbb"
+}
