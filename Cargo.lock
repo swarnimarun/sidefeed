@@ -1990,6 +1990,7 @@ dependencies = [
  "rss",
  "serde",
  "sqlx",
+ "str-distance",
  "tokio",
  "tracing",
  "tracing-actix-web",
@@ -2281,6 +2282,12 @@ dependencies = [
  "url",
  "uuid",
 ]
+
+[[package]]
+name = "str-distance"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8416ac807fc3d3a155ac5e752e03b54c1e8cd1f1bc134959d41a3389aa01cf57"
 
 [[package]]
 name = "stringprep"
