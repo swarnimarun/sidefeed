@@ -4,23 +4,31 @@ use serde::{Deserialize, Serialize};
 
 // TODO(swarnim): add support for profiles and users probably,
 // then add support for UUIDs as well.
+pub type FeedSourceId = i64;
 
-pub type FeedSourceId = usize;
 /// [`Feed`]: is a table with a metadata with id pointing a url.
 /// ## why?
 /// allows for adding metadata for urls
 pub type Feed = HashMap<FeedSourceId, FeedSource>;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FeedSource {
     /// feed name
     pub name: String,
     /// id to urls
-    pub url: (String, UrlType),
+    pub url: Url,
     /// store time for last checked
     pub last_checked: String,
     /// last modified
     pub last_modified: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Url {
+    pub url: String,
+    pub urltype: UrlType, 
+}
+
 
 /// [`UrlType`]: useful for identifying amongst url feed source types, like rss vs fediverse
 /// Unused atm.
