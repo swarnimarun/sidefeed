@@ -3,6 +3,9 @@ mod db;
 mod errors;
 mod models;
 
+use std::{path::{Path, PathBuf}, sync::Arc};
+
+use db::AppDB;
 use env_struct::env_struct;
 use error_stack::{Report, Result, ResultExt};
 use pretty_env_logger::formatted_builder;
@@ -10,8 +13,9 @@ use pretty_env_logger::formatted_builder;
 use actix_web::{
     middleware::Logger,
     web::{self, Data},
-    App, HttpResponse, HttpServer, Responder,
+    App, HttpResponse, HttpServer, Responder, HttpRequest, http::Method,
 };
+use str_distance::DistanceValue;
 
 use crate::{
     api::{
@@ -27,11 +31,37 @@ env_struct! {
     }
 }
 
-/// handle all unknown requests for now, NOT_FOUND(404) for all,
-async fn handle_unknown() -> impl Responder {
-    // TODO(swarnim):
-    // consider providing suggestions for miss-spellings eg, /feeds vs /feed
-    HttpResponse::NotFound()
+/// handle all unknown requests for now, NOT_FOUND(404)
+/// If a new endpoint is added, make sure to update the inner endpoints list so error messages are correct.
+async fn handle_unknown(req: HttpRequest) -> impl Responder {
+    use str_distance::{ Levenshtein, DistanceMetric };
+
+    let endpoints = [
+        ("/feed", [Method::GET]),
+        ("/feed/add", [Method::POST]),
+        ("/feed/edit", [Method::POST]),
+        ("/feed/remove", [Method::POST]),
+    ];
+
+    let path = req.path().trim_end_matches("/");
+    let path = if path.is_empty() { "/" } else { path };
+
+    let closest = endpoints.iter().find(|(it, _)| match Levenshtein::default().str_distance(it, path) {
+        DistanceValue::Exact(..=2) => true, 
+        _ => false,
+    });
+
+    let resp_str = if let Some((route, method)) = closest {
+        if route == &path {
+            format!("{} should be accessed as one of the following methods: {:?}", route, method)
+        } else {
+            format!("Did you mean {} instead of {}?", route, path)
+        }
+    } else {
+        format!("Invalid route {}", path)
+    };
+
+    HttpResponse::NotFound().json(resp_str)
 }
 
 #[actix_web::main]
