@@ -18,11 +18,14 @@
           name = "dev-shell";
 
           buildInputs = [
+            pkgs.openssl
+            pkgs.pkg-config
             pkgs.nodejs_22
             pkgs.pnpm
             pkgs.git
             pkgs.lazyjj
             pkgs.jujutsu
+	    # typescript stuff
             nodePackages.typescript-language-server
             nodePackages.typescript
           ];
