@@ -1,18 +1,36 @@
-# Welcome to Loco :train:
+# SideFeed
 
-[Loco](https://loco.rs) is a web and API framework running on Rust.
+Simple aggregation service that takes links, as URLs and converts said URLs into a combined feed. This allows for unified feeds and works agnostic to frontends.
 
-This is the **SaaS starter** which includes a `User` model and authentication based on JWT.
-It also include configuration sections that help you pick either a frontend or a server-side template set up for your fullstack server.
+## Features
 
+- Provide a HTTP REST API.
+- Basic Authentication and web frontend
 
-## Quick Start
+## Roadmap
+
+- Support for RSS(atom, v1 & v2) urls.
+- Support mass URL imports.
+- Support OPML imports.
+- Provide live-connection for feed updates(server-sent events).
+- Add caching for feeds to db.
+- Add search in cached feeds support, with sqlite full text search.
+- Support fediverse, and aggregation on hashtags.
+- Support websockets for api.
+- Add web-scraping for feed aggregation.
+- Support profiles for building multiple feeds.
+
+- Support websockets for push to discord and other services.
+- Connect to whatsapp, telegram channels through bots, etc.
+
+## Try it out
 
 ```sh
 cargo loco start
 ```
 
 ```sh
+$ pushd frontend && pnpm build && popd
 $ cargo loco start
 Finished dev [unoptimized + debuginfo] target(s) in 21.63s
     Running `target/debug/myapp start`
@@ -47,12 +65,3 @@ compilation: debug
 
 listening on http://localhost:5150
 ```
-
-## Full Stack Serving
-
-You can check your [configuration](config/development.yaml) to pick either frontend setup or server-side rendered template, and activate the relevant configuration sections.
-
-
-## Getting help
-
-Check out [a quick tour](https://loco.rs/docs/getting-started/tour/) or [the complete guide](https://loco.rs/docs/getting-started/guide/).

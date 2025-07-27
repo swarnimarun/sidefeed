@@ -9,7 +9,7 @@ logger:
   # Log level, options: trace, debug, info, warn or error.
   level: debug
   # Define the logging format. options: compact, pretty or json
-  format: compact
+  format: pretty 
   # By default the logger has filtering only logs that came from your code or logs that came from `loco` framework. to see all third party libraries
   # Uncomment the line below to override to see all third party libraries you can enable this config and override the logger filters.
   # override_filter: trace
@@ -41,9 +41,7 @@ workers:
   #   - BackgroundQueue - Workers operate asynchronously in the background, processing queued.
   #   - ForegroundBlocking - Workers operate in the foreground and block until tasks are completed.
   #   - BackgroundAsync - Workers operate asynchronously in the background, processing tasks with async capabilities.
-  mode: BackgroundAsync
-
-  
+  mode: BackgroundQueue
 
 # Mailer Configuration.
 mailer:
@@ -99,3 +97,12 @@ auth:
     secret: pt2QmuLQBnXQ5zjwRtDL
     # Token expiration time in seconds
     expiration: 604800 # 7 days
+
+queue:
+  kind: Sqlite
+  # SQLite Queue connection URI.
+  uri: {{ get_env(name="QUEUE_DATABASE_URL", default="sqlite://sidefeed_queue_development.sqlite?mode=rwc") }}
+  # Dangerously flush all data.
+  dangerously_flush: false
+  # represents the number of tasks a worker can handle simultaneously.
+  num_workers: 4

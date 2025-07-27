@@ -1,8 +1,9 @@
 import { LoginForm } from '@/components/login-form';
 import { Button } from '@/components/ui/button';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { Link, Outlet, createRootRoute } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { Link, Outlet, createRootRoute } from '@tanstack/react-router';
+import { useEffect, useState } from 'react';
+import { LogOut } from "lucide-react";
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -33,16 +34,6 @@ function Nav() {
             About
           </Link>
         </Button>
-        <Button variant={"link"}>
-          <Link
-            to="/resume"
-            activeProps={{
-              className: 'underline',
-            }}
-          >
-            Resume
-          </Link>
-        </Button>
       </div>
 
       <div className='m-2 flex gap-2'>
@@ -51,7 +42,9 @@ function Nav() {
           console.log("logout")
           deleteCookie('token');
           location.reload();
-        }}>Logout</Button>
+        }} variant={"secondary"}>
+          <LogOut className="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 transition-all" />
+        </Button>
       </div>
     </div>
   )

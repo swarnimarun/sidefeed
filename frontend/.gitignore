@@ -22,6 +22,7 @@ dist/
 *.njsproj
 *.sln
 *.sw?
+.tanstack
 
 # Common local dotenv files popularised by Create React App & Next.js
 # https://rsbuild.dev/guide/advanced/env-vars#env-file
