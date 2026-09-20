@@ -41,7 +41,7 @@ async fn sync_peer(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<
 
 pub async fn sync_due(state:&AppState){
     let cutoff=Utc::now()-chrono::Duration::from_std(state.config.fetch_interval).unwrap_or(chrono::Duration::minutes(15));
-    match state.store.peers().await{Ok(peers)=>for peer in peers{let due=peer.last_sync_at.as_deref().and_then(|v|DateTime::parse_from_rfc3339(v).ok()).map_or(true,|last|last.with_timezone(&Utc)<cutoff);if due{if let Err(error)=sync_one(state,&peer).await{tracing::warn!(peer_id=%peer.id,%error,"peer sync failed");}}},Err(error)=>tracing::warn!(%error,"could not list peers")}
+    match state.store.peers().await{Ok(peers)=>for peer in peers{let due=peer.last_sync_at.as_deref().and_then(|v|DateTime::parse_from_rfc3339(v).ok()).is_none_or(|last|last.with_timezone(&Utc)<cutoff);if due{if let Err(error)=sync_one(state,&peer).await{tracing::warn!(peer_id=%peer.id,%error,"peer sync failed");}}},Err(error)=>tracing::warn!(%error,"could not list peers")}
 }
 
 async fn sync_one(state:&AppState,peer:&Peer)->Result<usize>{
