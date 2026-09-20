@@ -96,21 +96,21 @@ impl Store {
     pub async fn feed_items(&self, slug: &str, limit: u32, cursor: Option<&str>) -> Result<Vec<Item>> {
         let feed = self.feed(slug).await?;
         let mut items: Vec<Item> = sqlx::query_as("SELECT i.* FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND i.published_at<? ORDER BY i.published_at DESC,i.id DESC LIMIT ?")
-            .bind(feed.id).bind(cursor.unwrap_or("9999-12-31T23:59:59Z")).bind(limit).fetch_all(&self.pool).await?;
+            .bind(&feed.id).bind(cursor.unwrap_or("9999-12-31T23:59:59Z")).bind(limit).fetch_all(&self.pool).await?;
         items.retain(|i| matches_filter(&feed, i)); Ok(items)
     }
 
     pub async fn search(&self, slug: &str, query: &str, limit: u32) -> Result<Vec<Item>> {
         let feed = self.feed(slug).await?;
         let mut items: Vec<Item> = sqlx::query_as("SELECT i.* FROM items_fts f JOIN items i ON i.id=f.item_id JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND items_fts MATCH ? ORDER BY bm25(items_fts),i.published_at DESC LIMIT ?")
-            .bind(feed.id).bind(query).bind(limit).fetch_all(&self.pool).await?;
+            .bind(&feed.id).bind(query).bind(limit).fetch_all(&self.pool).await?;
         items.retain(|i| matches_filter(&feed, i)); Ok(items)
     }
 
     pub async fn item_in_feed(&self, slug: &str, item: &Item) -> Result<bool> {
         let feed = self.feed(slug).await?;
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM feed_sources WHERE feed_id=? AND source_id=?")
-            .bind(feed.id).bind(&item.source_id).fetch_one(&self.pool).await?;
+            .bind(&feed.id).bind(&item.source_id).fetch_one(&self.pool).await?;
         Ok(count > 0 && matches_filter(&feed, item))
     }
 
