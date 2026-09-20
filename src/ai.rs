@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use axum::{extract::{Path, Query, State}, http::{HeaderMap, StatusCode}, routing::{get, post}, Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+#[cfg(feature="burn-local")]
 use sha2::{Digest, Sha256};
 use crate::{api::{access_feed, authorize}, error::{Error, Result}, model::Item, AppState};
 
