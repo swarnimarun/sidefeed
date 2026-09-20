@@ -107,6 +107,13 @@ impl Store {
         items.retain(|i| matches_filter(&feed, i)); Ok(items)
     }
 
+    pub async fn item_in_feed(&self, slug: &str, item: &Item) -> Result<bool> {
+        let feed = self.feed(slug).await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM feed_sources WHERE feed_id=? AND source_id=?")
+            .bind(feed.id).bind(&item.source_id).fetch_one(&self.pool).await?;
+        Ok(count > 0 && matches_filter(&feed, item))
+    }
+
     pub async fn public_items_since(&self, since: &str, limit: u32) -> Result<Vec<Item>> {
         Ok(sqlx::query_as("SELECT * FROM items WHERE visibility='public' AND fetched_at>? ORDER BY fetched_at ASC LIMIT ?")
             .bind(since).bind(limit).fetch_all(&self.pool).await?)
@@ -143,4 +150,3 @@ fn map_unique(error: sqlx::Error) -> Error {
     if let sqlx::Error::Database(db) = &error { if db.is_unique_violation() { return Error::Conflict("resource already exists".into()); } }
     Error::Database(error)
 }
-
