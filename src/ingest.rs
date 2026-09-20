@@ -95,7 +95,7 @@ fn header(response: &reqwest::Response, name: reqwest::header::HeaderName) -> Op
 }
 
 pub fn parse_document(bytes: &[u8], content_type: &str, base: &Url) -> Result<(Option<String>, Vec<NewItem>)> {
-    let trimmed = bytes.iter().copied().skip_while(u8::is_ascii_whitespace).next();
+    let trimmed = bytes.iter().copied().find(|byte| !byte.is_ascii_whitespace());
     if content_type.contains("json") || trimmed == Some(b'{') || trimmed == Some(b'[') { return parse_json(bytes, base); }
     let feed = feed_rs::parser::parse(Cursor::new(bytes)).map_err(|e| Error::Invalid(format!("unsupported feed: {e}")))?;
     let title = feed.title.map(|v| v.content);
