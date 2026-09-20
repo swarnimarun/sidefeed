@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Sidefeed aggregation dashboard"><title>Sidefeed</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header><div><span class="mark">S</span><strong>Sidefeed</strong></div><nav><a href="/docs">API</a><span id="status" class="pill">Connecting</span></nav></header>
+  <main>
+    <section class="hero"><p class="eyebrow">YOUR NETWORK, YOUR SIGNAL</p><h1>One calm feed from a noisy web.</h1><p>Collect RSS, ActivityPub, and shared peer caches. Filter locally. Publish anywhere.</p></section>
+    <section class="auth panel"><label for="token">Admin token</label><div class="row"><input id="token" type="password" autocomplete="current-password" placeholder="Not required for localhost defaults"><button id="save-token">Save locally</button></div><p class="hint">Stored only in this browser session and sent as a Bearer token.</p></section>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <section class="grid">
+      <article class="panel"><div class="heading"><div><p class="eyebrow">INPUTS</p><h2>Sources</h2></div><span id="source-count" class="count">0</span></div><form id="source-form"><input name="url" type="url" required placeholder="https://example.com/feed.xml"><input name="title" placeholder="Optional label"><button>Add source</button></form><div id="sources" class="stack empty">No sources yet.</div></article>
+      <article class="panel"><div class="heading"><div><p class="eyebrow">VIEWS</p><h2>Feeds</h2></div><span id="feed-count" class="count">0</span></div><form id="feed-form"><input name="slug" required pattern="[a-z0-9-]+" placeholder="daily-reading"><input name="title" required placeholder="Daily reading"><label class="check"><input name="public" type="checkbox"> Public</label><button>Create feed</button></form><div id="feeds" class="stack empty">No feeds yet.</div></article>
+    </section>
+    <section class="panel"><div class="heading"><div><p class="eyebrow">ROUTING</p><h2>Connect a source</h2></div></div><form id="attach-form" class="inline"><select name="feed" required><option value="">Choose feed</option></select><select name="source" required><option value="">Choose source</option></select><button>Connect</button></form></section>
+    <section class="panel timeline"><div class="heading"><div><p class="eyebrow">LATEST</p><h2 id="timeline-title">Feed preview</h2></div><div id="feed-links"></div></div><div id="items" class="stack empty">Choose a feed to preview its items.</div></section>
+  </main>
+  <footer>Sidefeed runs on your infrastructure · SQLite-backed · <a href="/healthz">Health</a></footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>
