@@ -36,7 +36,15 @@ async fn export_items(State(state):State<AppState>,headers:HeaderMap,method:Meth
 }
 
 async fn sync_peer(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<serde_json::Value>>{
-    authorize(&state,&headers)?;let peer=state.store.peer(&id).await?;
+    authorize(&state,&headers)?;let peer=state.store.peer(&id).await?;let merged=sync_one(&state,&peer).await?;Ok(Json(serde_json::json!({"merged":merged})))
+}
+
+pub async fn sync_due(state:&AppState){
+    let cutoff=Utc::now()-chrono::Duration::from_std(state.config.fetch_interval).unwrap_or(chrono::Duration::minutes(15));
+    match state.store.peers().await{Ok(peers)=>for peer in peers{let due=peer.last_sync_at.as_deref().and_then(|v|DateTime::parse_from_rfc3339(v).ok()).map_or(true,|last|last.with_timezone(&Utc)<cutoff);if due{if let Err(error)=sync_one(state,&peer).await{tracing::warn!(peer_id=%peer.id,%error,"peer sync failed");}}},Err(error)=>tracing::warn!(%error,"could not list peers")}
+}
+
+async fn sync_one(state:&AppState,peer:&Peer)->Result<usize>{
     let since=peer.last_sync_at.clone().unwrap_or_else(||"1970-01-01T00:00:00Z".into());
     let mut url=url::Url::parse(&format!("{}/federation/v1/items",peer.base_url)).map_err(|e|Error::Invalid(e.to_string()))?;
     url.query_pairs_mut().append_pair("since",&since).append_pair("limit",&state.config.peer_max_items.to_string());
@@ -49,7 +57,7 @@ async fn sync_peer(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<
     let items:Vec<Item>=serde_json::from_slice(&bytes).map_err(|e|Error::Invalid(format!("invalid peer response: {e}")))?;
     let mut merged=0;
     for item in items {let candidate=NewItem{external_id:item.external_id,url:item.url,title:item.title,summary:item.summary,content:item.content,author:item.author,published_at:item.published_at,tags:serde_json::from_str(&item.tags_json).unwrap_or_default(),raw:item.raw_json.and_then(|v|serde_json::from_str(&v).ok()),visibility:item.visibility};let stored=state.store.upsert_item(None,&candidate).await?;let _=state.events.send(stored);merged+=1;}
-    state.store.touch_peer(&peer.id).await?;Ok(Json(serde_json::json!({"merged":merged})))
+    state.store.touch_peer(&peer.id).await?;Ok(merged)
 }
 
 async fn verify_request(state:&AppState,headers:&HeaderMap,method:&Method,path:&str)->Result<()> {
