@@ -22,7 +22,7 @@ integrations must not make the local path require an external service.
 
 ## Milestones
 
-### 1. Foundation and storage
+### 1. Foundation and storage — complete
 
 - Replace the prototype with an Axum/Tokio service and a small configuration
   surface.
@@ -30,7 +30,7 @@ integrations must not make the local path require an external service.
   peers, fetch leases, and embeddings.
 - Add health/readiness endpoints, structured errors, pagination, and tests.
 
-### 2. Ingestion
+### 2. Ingestion — complete
 
 - Implement RSS, Atom, and JSON Feed discovery/parsing.
 - Accept ActivityPub outbox/collection documents and normalize Note/Article
@@ -39,21 +39,21 @@ integrations must not make the local path require an external service.
 - Poll conditionally with ETag/Last-Modified, enforce response limits, and use
   leases to prevent duplicate work inside a node.
 
-### 3. Feed products
+### 3. Feed products — complete
 
 - CRUD named feeds and attach sources to them.
 - Provide a chronological REST feed, FTS5 search, RSS 2.0, JSON Feed, and SSE.
 - Render a newsletter-ready HTML/text digest and a concise social-thread JSON
   representation. Actual sending/posting remains an adapter responsibility.
 
-### 4. Cooperative cache
+### 4. Cooperative cache — complete
 
 - Expose a bounded peer manifest and item endpoint.
 - Authenticate peer requests with an HMAC signature and timestamp window.
 - Pull items from configured peers before origin polling and merge by stable
   content ID, reducing duplicate origin requests across trusted nodes.
 
-### 5. Filtering and AI
+### 5. Filtering and AI — complete
 
 - Add deterministic include/exclude filters and ranking hooks.
 - Define an embedding provider interface with disabled, remote HTTP, and local
@@ -61,7 +61,7 @@ integrations must not make the local path require an external service.
   default build stays small.
 - Persist vectors for semantic retrieval and expose hybrid FTS/vector search.
 
-### 6. Operations and hardening
+### 6. Operations and hardening — complete
 
 - Add a multi-stage container image, example configuration, graceful shutdown,
   request limits, timeouts, retention, and a non-root runtime.
@@ -72,3 +72,8 @@ integrations must not make the local path require an external service.
 
 Each milestone is committed separately on `feat/sidefeed-v1`. The pull request
 checklist records tests and any deliberately deferred provider-specific work.
+
+Implementation is complete on this branch. Newsletter email delivery and
+posting to a specific social network remain adapters by design: the service
+produces portable HTML, text, and thread JSON so credentials and provider SDKs
+do not enter the core aggregator.

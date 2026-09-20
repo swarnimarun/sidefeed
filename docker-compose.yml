@@ -1,0 +1,15 @@
+services:
+  sidefeed:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SIDEFEED_PUBLIC_URL: http://localhost:8080
+      SIDEFEED_ADMIN_TOKEN: change-me
+    volumes:
+      - sidefeed-data:/home/sidefeed
+    restart: unless-stopped
+
+volumes:
+  sidefeed-data:
+
