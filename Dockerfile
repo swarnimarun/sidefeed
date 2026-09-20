@@ -1,6 +1,6 @@
 FROM rust:1.85-bookworm AS build
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY migrations ./migrations
 COPY src ./src
 RUN cargo build --release
@@ -17,4 +17,3 @@ ENV SIDEFEED_LISTEN=0.0.0.0:8080 \
 EXPOSE 8080
 VOLUME ["/home/sidefeed"]
 ENTRYPOINT ["sidefeed"]
-
