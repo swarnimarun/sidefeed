@@ -60,7 +60,7 @@ impl Store {
     }
 
     pub async fn upsert_item(&self, source_id: Option<&str>, item: &NewItem) -> Result<Item> {
-        let stable = format!("{}:{}", source_id.unwrap_or("peer"), item.external_id);
+        let stable = item.url.clone().unwrap_or_else(|| format!("{}:{}", source_id.unwrap_or("peer"), item.external_id));
         let id = Uuid::new_v5(&Uuid::NAMESPACE_URL, stable.as_bytes()).to_string();
         let tags = serde_json::to_string(&item.tags).map_err(|e| Error::Invalid(e.to_string()))?;
         let raw = item.raw.as_ref().map(ToString::to_string);
