@@ -1,6 +1,6 @@
 use std::{convert::Infallible, time::Duration};
 use async_stream::stream;
-use axum::{body::Bytes, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Response, Sse, sse::Event}, routing::{get, post}, Json, Router};
+use axum::{body::Bytes, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::{Html, IntoResponse, Response, Sse, sse::Event}, routing::{get, post}, Json, Router};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -9,6 +9,8 @@ use crate::{error::{Error, Result}, ingest, model::{Feed, Item, Page, Source}, A
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(dashboard)).route("/app.js", get(app_js)).route("/styles.css", get(styles))
+        .route("/docs", get(api_docs)).route("/openapi.json", get(openapi))
         .route("/healthz", get(health)).route("/readyz", get(ready))
         .route("/api/v1/sources", get(list_sources).post(create_source))
         .route("/api/v1/sources/{id}/poll", post(poll_source))
@@ -27,6 +29,12 @@ pub fn router(state: AppState) -> Router {
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT,Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http()).with_state(state)
 }
+
+async fn dashboard()->Html<&'static str>{Html(include_str!("web/index.html"))}
+async fn api_docs()->Html<&'static str>{Html(include_str!("web/docs.html"))}
+async fn app_js()->Response{with_type(include_str!("web/app.js").to_owned(),"text/javascript; charset=utf-8")}
+async fn styles()->Response{with_type(include_str!("web/styles.css").to_owned(),"text/css; charset=utf-8")}
+async fn openapi()->Response{with_type(include_str!("web/openapi.json").to_owned(),"application/json; charset=utf-8")}
 
 async fn health() -> Json<Value> { Json(json!({"status":"ok","version":env!("CARGO_PKG_VERSION")})) }
 async fn ready(State(state): State<AppState>) -> Result<Json<Value>> { state.store.ping().await?; Ok(Json(json!({"status":"ready"}))) }

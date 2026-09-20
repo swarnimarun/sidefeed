@@ -66,6 +66,8 @@ integrations must not make the local path require an external service.
 - Add a multi-stage container image, example configuration, graceful shutdown,
   request limits, timeouts, retention, and a non-root runtime.
 - Add unit/integration tests, formatting/lint/test CI, and operator docs.
+- Ship an embedded management dashboard and an OpenAPI 3.1 contract.
+- Exercise the complete source-to-feed publishing path with black-box E2E tests.
 - Document trust boundaries, federation key rotation, backups, and deployment.
 
 ## Delivery sequence
