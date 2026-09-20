@@ -19,6 +19,11 @@ docker compose up --build
 For a native build, install stable Rust and run `cargo run`. The default listen
 address is `0.0.0.0:8080`; data is stored in `sidefeed.db`.
 
+Open `http://localhost:8080/` for the embedded management dashboard. API
+documentation is available at `/docs`, with an OpenAPI 3.1 document at
+`/openapi.json`. The UI has no separate runtime or asset server and is compiled
+into the Sidefeed binary.
+
 Set a strong `SIDEFEED_ADMIN_TOKEN` outside a localhost-only deployment. Pass it
 as `Authorization: Bearer <token>` to management routes.
 
@@ -116,5 +121,10 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo check --features burn-local
 ```
+
+`cargo test` includes black-box E2E coverage of the real Axum router and a
+temporary migrated SQLite database: UI/docs availability, health, management
+authentication, feed creation, source attachment, item retrieval, FTS search,
+RSS, JSON Feed, newsletter HTML, and social-thread JSON.
 
 The project is licensed under MIT.
