@@ -24,7 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/feeds/{slug}/thread.json", get(social_thread))
         .merge(crate::federation::router()).merge(crate::ai::router())
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
-        .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT,Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http()).with_state(state)
 }
 

@@ -47,7 +47,7 @@ impl EmbeddingProvider for BurnLocalProvider {
         }
         let norm=values.iter().map(|v|v*v).sum::<f32>().sqrt().max(f32::EPSILON);for v in &mut values{*v/=norm;}
         let device=Default::default();let tensor=Tensor::<NdArray<f32>,1>::from_floats(values.as_slice(),&device);
-        tensor.into_data().to_vec::<f32>().map_err(|e|Error::Internal(e.to_string()))
+        tensor.into_data().to_vec::<f32>().map_err(|e|Error::Internal(format!("{e:?}")))
     }
 }
 
