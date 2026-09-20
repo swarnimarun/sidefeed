@@ -78,7 +78,7 @@ async fn social_thread(State(state):State<AppState>,headers:HeaderMap,Path(slug)
     access_feed(&state,&headers,&slug).await?;let items=state.store.feed_items(&slug,q.limit.unwrap_or(10).clamp(1,25),None).await?;Ok(Json(json!({"generated_at":Utc::now().to_rfc3339(),"posts":items.into_iter().map(|i|{let title=i.title.unwrap_or_else(||"New item".into());let url=i.url.unwrap_or_default();let mut text=format!("{}\n{}",title,url);if text.chars().count()>280{text=text.chars().take(279).collect();text.push('…');}json!({"text":text,"item_id":i.id})}).collect::<Vec<_>>() })))
 }
 
-async fn access_feed(state:&AppState,headers:&HeaderMap,slug:&str)->Result<Feed>{let feed=state.store.feed(slug).await?;if !feed.public{authorize(state,headers)?;}Ok(feed)}
+pub(crate) async fn access_feed(state:&AppState,headers:&HeaderMap,slug:&str)->Result<Feed>{let feed=state.store.feed(slug).await?;if !feed.public{authorize(state,headers)?;}Ok(feed)}
 pub(crate) fn authorize(state:&AppState,headers:&HeaderMap)->Result<()>{let Some(expected)=&state.config.admin_token else{return Ok(())};let supplied=headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer "));if supplied==Some(expected.as_str()){Ok(())}else{Err(Error::Unauthorized)}}
 fn validate_slug(slug:&str)->Result<()>{if slug.is_empty()||slug.len()>64||!slug.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'-'){Err(Error::Invalid("slug must contain lowercase letters, digits, or hyphens".into()))}else{Ok(())}}
 fn esc(value:&str)->String{value.replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;").replace('"',"&quot;").replace('\'',"&#39;")}

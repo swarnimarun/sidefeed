@@ -13,6 +13,7 @@ pub struct Config {
     pub admin_token: Option<String>,
     pub embedding_url: Option<String>,
     pub embedding_token: Option<String>,
+    pub embedding_provider: String,
 }
 
 impl Config {
@@ -28,6 +29,7 @@ impl Config {
             admin_token: env::var("SIDEFEED_ADMIN_TOKEN").ok().filter(|v| !v.is_empty()),
             embedding_url: env::var("SIDEFEED_EMBEDDING_URL").ok().filter(|v| !v.is_empty()),
             embedding_token: env::var("SIDEFEED_EMBEDDING_TOKEN").ok().filter(|v| !v.is_empty()),
+            embedding_provider: env::var("SIDEFEED_EMBEDDING_PROVIDER").unwrap_or_else(|_| "disabled".into()),
         })
     }
 }
@@ -36,4 +38,3 @@ fn parse<T: FromStr>(name: &str, default: &str) -> Result<T> {
     env::var(name).unwrap_or_else(|_| default.to_owned()).parse()
         .map_err(|_| Error::Config(format!("invalid {name}")))
 }
-
