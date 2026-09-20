@@ -27,10 +27,11 @@ impl AppState {
             .user_agent(format!("sidefeed/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(5))
             .timeout(config.fetch_timeout)
-            .redirect(reqwest::redirect::Policy::limited(5))
+            // Redirects are followed by the ingestion layer so every hop is
+            // checked against the private-network denylist.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let (events, _) = broadcast::channel(256);
         Ok(Self { config: Arc::new(config), store, http, events })
     }
 }
-
