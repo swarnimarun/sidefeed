@@ -119,6 +119,10 @@ impl Store {
             .bind(since).bind(limit).fetch_all(&self.pool).await?)
     }
 
+    pub async fn prune_items(&self, before: &str) -> Result<u64> {
+        Ok(sqlx::query("DELETE FROM items WHERE fetched_at<?").bind(before).execute(&self.pool).await?.rows_affected())
+    }
+
     pub async fn create_peer(&self, base_url: &str, secret: &str) -> Result<Peer> {
         let id = Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO peers(id,base_url,shared_secret,created_at) VALUES(?,?,?,?)")

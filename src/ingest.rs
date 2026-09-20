@@ -19,12 +19,17 @@ pub async fn poll_loop(state: AppState) {
 }
 
 pub async fn poll_due(state: &AppState) -> Result<()> {
+    crate::federation::sync_due(state).await;
     for source in state.store.due_sources(32).await? {
         if let Err(error) = poll_source(state, &source).await {
             tracing::warn!(source_id=%source.id, %error, "source poll failed");
             let next = (Utc::now() + chrono::Duration::from_std(state.config.fetch_interval).unwrap_or(chrono::Duration::minutes(15))).to_rfc3339();
             state.store.update_source_fetch(&source.id, None, None, None, Some(&error.to_string()), &next).await?;
         }
+    }
+    if state.config.retention_days > 0 {
+        let before=(Utc::now()-chrono::Duration::days(state.config.retention_days as i64)).to_rfc3339();
+        state.store.prune_items(&before).await?;
     }
     Ok(())
 }
