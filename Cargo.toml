@@ -36,4 +36,5 @@ default = []
 burn-local = ["dep:burn"]
 
 [dev-dependencies]
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
