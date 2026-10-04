@@ -869,3 +869,39 @@ async fn burst_traffic_gets_a_429_with_retry_after() {
     assert!(limited, "200 rapid requests must trip the global limiter in tests");
 }
 // --- end lane-authsec Task 8 ---
+
+// ---- Task 9: peer-secret rotation with a 24 h grace window ----
+#[tokio::test]
+async fn peer_secret_rotation_keeps_both_secrets_valid_during_grace() {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let (app, state, _d) = fixture().await;
+    let previous = "a".repeat(32);
+    let peer = state.store.create_peer("https://friend.example", &previous).await.unwrap();
+    // Rotation needs the admin token like every other peer mutation.
+    let denied = app.clone().oneshot(request("POST",
+        &format!("/api/v1/peers/{}/rotate", peer.id), None, false)).await.unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let res = app.clone().oneshot(request("POST",
+        &format!("/api/v1/peers/{}/rotate", peer.id), None, true)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    let secret = body["secret"].as_str().expect("rotated secret is returned once").to_string();
+    assert!(secret.len() >= 32);
+    assert_ne!(secret, previous);
+    assert!(body["expires_old_at"].is_string(), "grace expiry is disclosed");
+    // Both the fresh secret and the previous one verify inside the window:
+    // each signs a real export request the way a peer node would.
+    for candidate in [&previous, &secret] {
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let path = "/federation/v1/items?since=1970-01-01T00:00:00Z&limit=10";
+        let mut mac = Hmac::<Sha256>::new_from_slice(candidate.as_bytes()).unwrap();
+        mac.update(format!("{timestamp}\nGET\n{path}").as_bytes());
+        let signed = Request::builder().method("GET").uri(path)
+            .header("x-sidefeed-timestamp", &timestamp)
+            .header("x-sidefeed-signature", hex::encode(mac.finalize().into_bytes()))
+            .body(Body::empty()).unwrap();
+        let res = app.clone().oneshot(signed).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "secret verifies during grace");
+    }
+}

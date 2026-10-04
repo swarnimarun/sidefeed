@@ -70,6 +70,29 @@ integrations must not make the local path require an external service.
 - Exercise the complete source-to-feed publishing path with black-box E2E tests.
 - Document trust boundaries, federation key rotation, backups, and deployment.
 
+### 7. Read-plus-follow, raw channels, tiny AI, auth, unified UX — complete
+
+- Add ActivityPub read-plus-follow sources: WebFinger/actor resolution,
+  outbox polling, signed Follow, and an inbox that understands
+  `Accept{Follow}` and `Create` only (gated by `SIDEFEED_AP_ENABLED`).
+- Add raw channels: a generic `raw-json` poller (pointer plus field map) and
+  signed webhook ingress capped at 100 items per batch.
+- Wire `onnx-local` embeddings, an auto-embed backfill loop, a unified
+  `GET /api/v1/ai/status`, and feed-scoped ask with an extractive fallback.
+- Ship scoped API keys (`read:private` / `write:private` /
+  `bookmarks:write`), strict key-management limits plus a global per-IP
+governor, and `POST /api/v1/peers/{id}/rotate` with a 24 h dual-secret grace.
+- Unify the reader on the SolidJS app with management views (`/manage`,
+  `/keys`, `/ai`; admin token in session storage only), infinite scroll via
+  `next_cursor`, toast feedback, actionable empty states, heading focus, and
+  44px touch targets under 900px.
+
+Explicit non-goals: no general-purpose ActivityPub server (no multi-user
+actors, relays, or boosts beyond Announce-read), no WebSub/MQTT/SSE ingress,
+no CSV/NDJSON channels, no multi-replica shared rate-limit state (in-memory
+governor is single-process), and no email delivery or social posting (adapters
+per the boundaries above).
+
 ## Delivery sequence
 
 Each milestone is committed separately on `feat/sidefeed-v1`. The pull request

@@ -25,9 +25,17 @@ on `/api/v1/items/*/bookmark` if you do not want the saved list to be world-writ
 
 Peers are explicitly configured and authenticate exports with HMAC-SHA256.
 Both peers must use the same 32-or-more-character secret. Signatures cover the
-timestamp, method, path, and query and expire after five minutes. Rotate a key
-by replacing the peer on both nodes during a maintenance window. TLS is still
+timestamp, method, path, and query and expire after five minutes. TLS is still
 required to conceal feed data and signatures in transit.
+
+Rotate a peer secret with `POST /api/v1/peers/{id}/rotate` (admin bearer):
+the response carries the fresh secret exactly once plus `expires_old_at`.
+The previous secret keeps verifying for 24 hours so the other node can roll
+over without a synchronized maintenance window; after the grace expiry it
+fails closed. Rotating again supersedes the earlier window. Copy the fresh
+secret to the peer over an already-trusted channel and confirm a sync before
+the expiry. Treat the SQLite file as secret-bearing: it holds peer secrets
+(current and grace-window) alongside fetched content.
 
 SQLite contains fetched content, peer secrets, and optional embedding vectors.
 Back up the database with SQLite's online backup tooling or while Sidefeed is
@@ -75,6 +83,15 @@ require `write:private`, and bookmark writes (when gated) require
 - `SIDEFEED_BOOKMARKS_REQUIRE_AUTH=1` routes bookmark writes through
   `require_scope(_, "bookmarks:write")`. At `0` (default) bookmarks stay a
   bounded token-free write.
+
+## Model files are operator-supplied
+
+`SIDEFEED_ONNX_EMBED_MODEL` points at a `.onnx` embedding artifact (e.g. a
+quantized MiniLM-L6-v2) plus its tokenizer file. Model files are trusted,
+operator-supplied input: they are memory-mapped by the inference runtime, so
+only load files you fetched yourself from a source you trust. A missing or
+unreadable path keeps the provider disabled; ingestion and delivery never wait
+on it.
 
 ## Rate limits (lane-authsec, Tasks 1 + 8)
 

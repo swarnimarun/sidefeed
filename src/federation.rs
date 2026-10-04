@@ -16,6 +16,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/peers", get(list_peers).post(create_peer))
         .route("/api/v1/peers/{id}/sync", post(sync_peer))
+        .route("/api/v1/peers/{id}/rotate", post(rotate_peer))
         .route("/federation/v1/items", get(export_items))
 }
 
@@ -37,6 +38,12 @@ async fn export_items(State(state):State<AppState>,headers:HeaderMap,method:Meth
 
 async fn sync_peer(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<serde_json::Value>>{
     authorize(&state,&headers)?;let peer=state.store.peer(&id).await?;let merged=sync_one(&state,&peer).await?;Ok(Json(serde_json::json!({"merged":merged})))
+}
+/// Rotate one peer's secret. The fresh secret is returned exactly once;
+/// the previous secret keeps verifying for 24 h so the other node can roll
+/// over without a synchronized maintenance window.
+async fn rotate_peer(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<serde_json::Value>>{
+    authorize(&state,&headers)?;let (_peer,secret,expires_old_at)=state.store.rotate_peer(&id).await?;Ok(Json(serde_json::json!({"secret":secret,"expires_old_at":expires_old_at})))
 }
 
 pub async fn sync_due(state:&AppState){
@@ -64,7 +71,22 @@ async fn verify_request(state:&AppState,headers:&HeaderMap,method:&Method,path:&
     let timestamp=value(headers,PEER_TIME)?;let signature=value(headers,PEER_SIGNATURE)?;
     let sent: i64=timestamp.parse().map_err(|_|Error::Unauthorized)?;if (Utc::now().timestamp()-sent).abs()>300{return Err(Error::Unauthorized);}
     let expected=hex::decode(signature).map_err(|_|Error::Unauthorized)?;let message=format!("{timestamp}\n{}\n{path}",method.as_str());
-    for peer in state.store.peers().await? {let mut mac=HmacSha256::new_from_slice(peer.shared_secret.as_bytes()).map_err(|_|Error::Unauthorized)?;mac.update(message.as_bytes());if mac.verify_slice(&expected).is_ok(){return Ok(());}}
+    for peer in state.store.peers().await? {
+        // The live secret plus the previous one while its 24 h grace window
+        // is still in the future; anything older fails closed.
+        let mut candidates: Vec<&str> = vec![peer.shared_secret.as_str()];
+        if let Some(previous) = peer.prev_secret.as_deref() {
+            let live = peer.prev_expires_at.as_deref()
+                .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
+                .is_some_and(|expires| expires.with_timezone(&Utc) > Utc::now());
+            if live { candidates.push(previous); }
+        }
+        for secret in candidates {
+            let mut mac=HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_|Error::Unauthorized)?;
+            mac.update(message.as_bytes());
+            if mac.verify_slice(&expected).is_ok(){return Ok(());}
+        }
+    }
     Err(Error::Unauthorized)
 }
 fn value<'a>(headers:&'a HeaderMap,name:&str)->Result<&'a str>{headers.get(name).and_then(|v|v.to_str().ok()).ok_or(Error::Unauthorized)}

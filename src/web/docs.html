@@ -106,11 +106,57 @@
             </td>
             <td>Bearer token</td>
           </tr>
+          <tr>
+            <td>Keys</td>
+            <td>
+              <code>POST /api/v1/keys</code><br>
+              <code>DELETE /api/v1/keys/{id}</code>
+            </td>
+            <td>Admin bearer only; mint in the <a href="/keys">keys UI</a></td>
+          </tr>
+          <tr>
+            <td>Peers</td>
+            <td>
+              <code>GET/POST /api/v1/peers</code><br>
+              <code>POST /api/v1/peers/{id}/sync</code><br>
+              <code>POST /api/v1/peers/{id}/rotate</code>
+            </td>
+            <td>Bearer token</td>
+          </tr>
+          <tr>
+            <td>AI</td>
+            <td>
+              <code>GET /api/v1/ai/status</code><br>
+              <code>POST /api/v1/feeds/{slug}/ask</code>
+            </td>
+            <td>Status is public; ask follows feed visibility</td>
+          </tr>
         </tbody>
       </table>
       <p>
         Adding a feed the reader can show is two calls: create the feed with <code>public: true</code>
         and connect a source to it. See the <a href="/openapi.json">OpenAPI document</a> for schemas.
+      </p>
+    </section>
+
+    <section class="panel docs">
+      <h2>Management UI</h2>
+      <p>
+        The reader ships with management views at <a href="/manage">/manage</a>
+        (sources, feeds, OPML import), <a href="/keys">/keys</a> (scoped key
+        minting), and <a href="/ai">/ai</a> (provider status). They ask for the
+        admin token once per tab and keep it in session storage, never on disk.
+      </p>
+    </section>
+
+    <section class="panel docs">
+      <h2>Peer rotation</h2>
+      <p>
+        <code>POST /api/v1/peers/{id}/rotate</code> returns the fresh secret
+        exactly once. The previous secret keeps verifying for 24 hours, so the
+        other node can adopt the new secret without a synchronized maintenance
+        window. Copy the new secret to the peer, then confirm it syncs before
+        the grace expiry in the response.
       </p>
     </section>
 

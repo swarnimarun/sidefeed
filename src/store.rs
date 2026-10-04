@@ -359,6 +359,23 @@ impl Store {
     pub async fn peers(&self) -> Result<Vec<Peer>> { Ok(sqlx::query_as("SELECT * FROM peers WHERE enabled=1 ORDER BY created_at").fetch_all(&self.pool).await?) }
     pub async fn touch_peer(&self, id: &str) -> Result<()> { sqlx::query("UPDATE peers SET last_sync_at=? WHERE id=?").bind(Utc::now().to_rfc3339()).bind(id).execute(&self.pool).await?; Ok(()) }
 
+    /// Rotate one peer's secret: the old secret moves to `prev_secret` with a
+    /// 24 h grace expiry while the fresh secret takes over immediately.
+    /// Returns the row, the plaintext (disclosed once by the route), and the
+    /// grace expiry. Rotating again supersedes the previous grace window.
+    pub async fn rotate_peer(&self, id: &str) -> Result<(Peer, String, String)> {
+        use base64::Engine as _;
+        use rand::RngCore as _;
+        let peer = self.peer(id).await?;
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let plaintext = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let expires = (Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+        sqlx::query("UPDATE peers SET shared_secret=?, prev_secret=?, prev_expires_at=? WHERE id=?")
+            .bind(&plaintext).bind(&peer.shared_secret).bind(&expires).bind(id).execute(&self.pool).await?;
+        Ok((self.peer(id).await?, plaintext, expires))
+    }
+
     pub async fn put_embedding(&self, item_id: &str, provider: &str, vector: &[f32]) -> Result<()> {
         let json = serde_json::to_string(vector).map_err(|e| Error::Internal(e.to_string()))?;
         sqlx::query("INSERT INTO embeddings(item_id,provider,dimensions,vector_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(item_id,provider) DO UPDATE SET dimensions=excluded.dimensions,vector_json=excluded.vector_json,created_at=excluded.created_at")

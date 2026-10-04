@@ -24,6 +24,11 @@ pub struct Feed {
 pub struct Peer {
     pub id: String, pub base_url: String,
     #[serde(skip_serializing)] pub shared_secret: String,
+    // Rotation grace: the previous secret stays valid until `prev_expires_at`
+    // (24 h after rotation). Both are never serialized; `rotate` discloses
+    // the fresh secret exactly once in its own response.
+    #[serde(skip_serializing)] pub prev_secret: Option<String>,
+    #[serde(skip_serializing)] pub prev_expires_at: Option<String>,
     pub enabled: bool, pub last_sync_at: Option<String>, pub created_at: String,
 }
 

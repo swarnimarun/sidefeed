@@ -76,6 +76,54 @@ uses SQLite FTS5 at
 `/api/v1/feeds/{slug}/search?q=terms`. Live consumers can subscribe to
 `/api/v1/feeds/{slug}/stream`.
 
+## Management UI and API keys
+
+Open `/manage` to add sources, poll them, attach them to feeds, import OPML,
+and create feeds; `/keys` mints and revokes scoped API keys; `/ai` shows
+provider status. The views ask for the admin token once per tab and keep it
+in session storage, never on disk. The same flows work over HTTP:
+
+```sh
+# Mint a read-only key (the token is shown once).
+curl -sS http://localhost:8080/api/v1/keys \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer change-me' \
+  -d '{"name":"laptop","scopes":["read:private"]}'
+
+# Use it for management reads; writes need `write:private` or the admin bearer.
+curl -sS http://localhost:8080/api/v1/sources \
+  -H 'authorization: Bearer sf_…'
+```
+
+Management reads require `read:private`, writes require `write:private`, and
+gated bookmark writes require `bookmarks:write`. Revoke with
+`DELETE /api/v1/keys/{id}`.
+
+## ActivityPub follow and raw channels
+
+```sh
+# Follow a fediverse account: resolves WebFinger/actor once, then polls the
+# outbox like any other source. Needs SIDEFEED_AP_ENABLED=1 to receive Accepts.
+curl -sS http://localhost:8080/api/v1/sources \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer change-me' \
+  -d '{"url":"user@example.social","kind":"activitypub"}'
+curl -X POST http://localhost:8080/api/v1/sources/SOURCE_ID/follow \
+  -H 'authorization: Bearer change-me'
+
+# Poll a generic JSON endpoint with a pointer plus field map.
+curl -sS http://localhost:8080/api/v1/sources \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer change-me' \
+  -d '{"url":"https://example.com/data.json","kind":"raw-json",
+       "config":{"items_pointer":"/data/posts","id_field":"uid",
+                 "title_field":"headline","url_field":"link","date_field":"ts"}}'
+```
+
+Signed webhook batches go to `POST /api/v1/ingress/{slug}`, authenticated by
+the channel secret as a Bearer token or an `x-sidefeed-signature` HMAC header
+(capped at 100 items per batch).
+
 ## Peer cache
 
 Configure each node with the other node's public base URL and the same random
@@ -95,6 +143,17 @@ Synchronization is pull-based and only exports items marked public. Items use a
 stable URL-derived ID where possible, so peer copies and origin copies converge
 instead of multiplying.
 
+Rotate a peer secret without a synchronized maintenance window:
+
+```sh
+curl -sS -X POST http://localhost:8080/api/v1/peers/PEER_ID/rotate \
+  -H 'authorization: Bearer change-me'
+# {"secret":"…","expires_old_at":"…"}: the secret is shown once.
+```
+
+Copy the fresh secret to the other node. The previous secret keeps verifying
+for 24 hours (`expires_old_at`), then fails closed.
+
 ## Filtering and embeddings
 
 Feeds accept comma-separated `include_terms` and `exclude_terms`. These filters
@@ -111,6 +170,11 @@ AI is optional:
 
 Create a vector with `POST /api/v1/items/{id}/embed`, then query hybrid
 FTS/vector results at `/api/v1/feeds/{slug}/semantic?q=terms`.
+
+`GET /api/v1/ai/status` reports the live enrich and embedding providers plus
+their backlogs (always 200, even with both disabled). Ask a feed-scoped
+question with `POST /api/v1/feeds/{slug}/ask`; without a chat model the answer
+is quoted extractively from the top hits with citations.
 
 ## Configuration
 
@@ -134,7 +198,15 @@ FTS/vector results at `/api/v1/feeds/{slug}/semantic?q=terms`.
 | `SIDEFEED_RATE_LIMIT_BURST` | `30` | Global per-IP burst |
 | `SIDEFEED_ENRICH_PROVIDER` | `disabled` | `disabled`, `heuristic`, or `openai` |
 | `SIDEFEED_ENRICH_URL` | unset | Chat endpoint for `openai` enrichment |
+| `SIDEFEED_ENRICH_TOKEN` | unset | Bearer token for the chat endpoint |
 | `SIDEFEED_ENRICH_MODEL` | unset | Chat model for `openai` enrichment |
+| `SIDEFEED_ENRICH_MAX_CHARS` | `8000` | Per-item input truncation for enrichment |
+| `SIDEFEED_ENRICH_BATCH` | `4` | Items enriched per loop pass |
+| `SIDEFEED_ENRICH_INTERVAL_SECONDS` | `60` | Seconds between enrichment passes |
+| `SIDEFEED_ENRICH_CACHE_ENTRIES` | `128` | In-memory derived-artifact cache cap |
+| `SIDEFEED_EMBEDDING_URL` | unset | JSON endpoint for `remote` embeddings |
+| `SIDEFEED_EMBEDDING_TOKEN` | unset | Bearer token for the embedding endpoint |
+| `SIDEFEED_WEB_DIR` | unset | Override embedded UI files from disk |
 
 Scoped API keys (`POST /api/v1/keys`, `DELETE /api/v1/keys/{id}`) gate management
 reads (`read:private`) and writes (`write:private`); the admin bearer passes every
