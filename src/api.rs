@@ -20,8 +20,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/feeds/{slug}/items", get(feed_items))
         .route("/api/v1/feeds/{slug}/search", get(search))
         .route("/api/v1/feeds/{slug}/stream", get(feed_stream))
-        .route("/feeds/{slug}.rss", get(rss_feed))
-        .route("/feeds/{slug}.json", get(json_feed))
+        .route("/feeds/{file}", get(feed_output))
         .route("/feeds/{slug}/newsletter", get(newsletter))
         .route("/feeds/{slug}/thread.json", get(social_thread))
         .merge(crate::federation::router()).merge(crate::ai::router())
@@ -67,6 +66,19 @@ async fn feed_stream(State(state):State<AppState>,headers:HeaderMap,Path(slug):P
     access_feed(&state,&headers,&slug).await?;let mut receiver=state.events.subscribe();let store=state.store.clone();
     let events=stream!{loop{match receiver.recv().await{Ok(item)=>if store.item_in_feed(&slug,&item).await.unwrap_or(false){yield Ok(Event::default().event("item").json_data(&item).unwrap_or_else(|_|Event::default().event("error")));},Err(tokio::sync::broadcast::error::RecvError::Lagged(n))=>yield Ok(Event::default().event("lagged").data(n.to_string())),Err(_)=>break}}};
     Ok(Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default()))
+}
+
+// axum 0.8 rejects a suffix after a path parameter within one segment, so the
+// public /feeds/{slug}.rss and /feeds/{slug}.json URLs are captured by a single
+// route and dispatched on the extension of the requested file here.
+async fn feed_output(State(state):State<AppState>,headers:HeaderMap,Path(file):Path<String>)->Result<Response>{
+    let (slug,extension)=file.rsplit_once('.').ok_or(Error::NotFound)?;
+    let slug=slug.to_owned();
+    match extension{
+        "rss"=>rss_feed(State(state),headers,Path(slug)).await,
+        "json"=>Ok(json_feed(State(state),headers,Path(slug)).await?.into_response()),
+        _=>Err(Error::NotFound),
+    }
 }
 
 async fn rss_feed(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>)->Result<Response>{
