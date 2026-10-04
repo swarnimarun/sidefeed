@@ -1,11 +1,11 @@
-use std::{convert::Infallible, time::Duration};
+use std::{cmp::Ordering, collections::HashMap, convert::Infallible, time::Duration};
 use async_stream::stream;
 use axum::{body::{Body, Bytes}, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Response, Sse, sse::Event}, routing::{get, post}, Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
-use crate::{error::{Error, Result}, ingest, model::{Feed, Item, Page, Source}, AppState};
+use crate::{error::{Error, Result}, ingest, model::{EnrichedItem, Feed, Item, ItemWithFeed, Page, Source}, AppState};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -14,6 +14,7 @@ pub fn router(state: AppState) -> Router {
         .route("/fonts/{file}", get(font_asset))
         .route("/healthz", get(health)).route("/readyz", get(ready))
         .route("/api/v1/public/feeds", get(public_feeds))
+        .route("/api/v1/recent", get(recent))
         .route("/api/v1/sources", get(list_sources).post(create_source))
         .route("/api/v1/sources/{id}/poll", post(poll_source))
         .route("/api/v1/import/opml", post(import_opml))
@@ -25,7 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/feeds/{file}", get(feed_output))
         .route("/feeds/{slug}/newsletter", get(newsletter))
         .route("/feeds/{slug}/thread.json", get(social_thread))
-        .merge(crate::federation::router()).merge(crate::ai::router())
+        .merge(crate::federation::router()).merge(crate::ai::router()).merge(crate::enrich::router())
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT,Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http()).with_state(state)
@@ -70,6 +71,45 @@ async fn public_feeds(State(state):State<AppState>)->Result<Json<Vec<PublicFeed>
     Ok(Json(state.store.feeds().await?.into_iter().filter(|feed|feed.public).map(|feed|PublicFeed{slug:feed.slug,title:feed.title,description:feed.description}).collect()))
 }
 
+#[derive(Deserialize)] struct RecentQuery {hours:Option<u32>,limit:Option<u32>}
+#[derive(Serialize)] struct RecentItem {#[serde(flatten)] item:Item,feed:String,feed_title:String,tags:Vec<String>,ai_summary:Option<String>,score:f32}
+
+/// What happened lately across every public feed, ranked by recency and source
+/// variety so one busy source cannot fill the list. Token-free, like the other
+/// public reads.
+async fn recent(State(state):State<AppState>,Query(q):Query<RecentQuery>)->Result<Json<Vec<RecentItem>>>{
+    let hours=q.hours.unwrap_or(48).clamp(1,336);
+    let limit=q.limit.unwrap_or(40).clamp(1,200);
+    let since=(Utc::now()-chrono::Duration::hours(hours as i64)).to_rfc3339();
+    let rows=state.store.recent_items(&since,limit.saturating_mul(4).min(400)).await?;
+    let now=Utc::now();
+    let mut per_source:HashMap<String,usize>=HashMap::new();
+    let mut scored:Vec<(f32,ItemWithFeed)>=rows.into_iter().map(|row|{
+        let age_hours=chrono::DateTime::parse_from_rfc3339(&row.item.published_at)
+            .map(|stamp|(now-stamp.with_timezone(&Utc)).num_minutes() as f32/60.0)
+            .unwrap_or(hours as f32);
+        let recency=(1.0-(age_hours/hours as f32)).clamp(0.0,1.0);
+        let count=per_source.entry(row.feed_slug.clone()).or_insert(0);
+        let variety=1.0/(1.0+*count as f32);
+        *count+=1;
+        (recency*0.7+variety*0.3,row)
+    }).collect();
+    scored.sort_by(|left,right|right.0.partial_cmp(&left.0).unwrap_or(Ordering::Equal));
+    let ids:Vec<String>=scored.iter().map(|(_,row)|row.item.id.clone()).collect();
+    let atoms=crate::enrich::atoms_for(&state,&ids).await.unwrap_or_default();
+    let mut seen:HashMap<String,usize>=HashMap::new();
+    let mut items=Vec::new();
+    for (score,row) in scored {
+        let count=seen.entry(row.feed_slug.clone()).or_insert(0);
+        if *count>=6{continue;}
+        *count+=1;
+        let derived=atoms.get(&row.item.id).cloned().unwrap_or_default();
+        items.push(RecentItem{feed:row.feed_slug,feed_title:row.feed_title,item:row.item,tags:derived.tags,ai_summary:derived.summary,score});
+        if items.len()>=limit as usize{break;}
+    }
+    Ok(Json(items))
+}
+
 async fn health() -> Json<Value> { Json(json!({"status":"ok","version":env!("CARGO_PKG_VERSION")})) }
 async fn ready(State(state): State<AppState>) -> Result<Json<Value>> { state.store.ping().await?; Ok(Json(json!({"status":"ready"}))) }
 
@@ -92,8 +132,18 @@ async fn create_feed(State(state):State<AppState>,headers:HeaderMap,Json(input):
 async fn list_feeds(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Feed>>>{authorize(&state,&headers)?;Ok(Json(state.store.feeds().await?))}
 async fn attach_source(State(state):State<AppState>,headers:HeaderMap,Path((slug,source_id)):Path<(String,String)>)->Result<StatusCode>{authorize(&state,&headers)?;state.store.attach_source(&slug,&source_id).await?;Ok(StatusCode::NO_CONTENT)}
 
-#[derive(Deserialize)] struct PageQuery {limit:Option<u32>,cursor:Option<String>}
-async fn feed_items(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>,Query(q):Query<PageQuery>)->Result<Json<Page<Item>>>{access_feed(&state,&headers,&slug).await?;let limit=q.limit.unwrap_or(50).clamp(1,200);let items=state.store.feed_items(&slug,limit,q.cursor.as_deref()).await?;let next_cursor=if items.len()==limit as usize{items.last().map(|i|i.published_at.clone())}else{None};Ok(Json(Page{items,next_cursor}))}
+#[derive(Deserialize)] struct PageQuery {limit:Option<u32>,cursor:Option<String>,tag:Option<String>}
+async fn feed_items(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>,Query(q):Query<PageQuery>)->Result<Json<Page<EnrichedItem>>>{
+    access_feed(&state,&headers,&slug).await?;let limit=q.limit.unwrap_or(50).clamp(1,200);
+    let tag=q.tag.as_deref().map(str::trim).filter(|tag|!tag.is_empty());
+    let items=state.store.feed_items_tagged(&slug,limit,q.cursor.as_deref(),tag).await?;
+    let next_cursor=if items.len()==limit as usize{items.last().map(|i|i.published_at.clone())}else{None};
+    // One query for the whole page's derived artifacts, then one small cache fill.
+    let ids:Vec<String>=items.iter().map(|item|item.id.clone()).collect();
+    let atoms=crate::enrich::atoms_for(&state,&ids).await.unwrap_or_default();
+    let page=items.into_iter().map(|item|{let found=atoms.get(&item.id).cloned().unwrap_or_default();EnrichedItem::new(item,found)}).collect();
+    Ok(Json(Page{items:page,next_cursor}))
+}
 #[derive(Deserialize)] struct SearchQuery {q:String,limit:Option<u32>}
 async fn search(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>,Query(q):Query<SearchQuery>)->Result<Json<Vec<Item>>>{access_feed(&state,&headers,&slug).await?;if q.q.trim().is_empty(){return Err(Error::Invalid("q is required".into()));}Ok(Json(state.store.search(&slug,&q.q,q.limit.unwrap_or(30).clamp(1,100)).await?))}
 

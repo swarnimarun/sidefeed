@@ -120,7 +120,12 @@ const read = (() => {
 })();
 
 // ---------------------------------------------------------------- state
-const state = { feeds: [], slug: '', items: [], selected: null, stream: null };
+const state = { feeds: [], slug: '', items: [], selected: null, stream: null, mode: 'feed', tag: '', hours: 48 };
+
+// Prefer what the feed shipped; fall back to the generated summary so link-only
+// items, which have no body at all, still say something useful in the list.
+const rowSummary = (item, title) => usefulSummary(item, title)
+  || (item.ai_summary ? preview(item.ai_summary, 160) : '');
 
 async function api(path) {
   const response = await fetch(path, { headers: { accept: 'application/json' } });
@@ -150,13 +155,15 @@ function togglePane(name, force) {
 
 // ---------------------------------------------------------------- render
 function renderFeeds() {
-  $('#feeds').innerHTML = state.feeds.map((feed) => `
+  const recent = `<li><button type="button" data-recent="1"${state.mode === 'recent' ? ' class="active" aria-current="true"' : ''}>recent</button></li>`;
+  $('#feeds').innerHTML = recent + state.feeds.map((feed) => `
     <li>
-      <button type="button" data-slug="${escapeHtml(feed.slug)}"${feed.slug === state.slug ? ' class="active" aria-current="true"' : ''}>
+      <button type="button" data-slug="${escapeHtml(feed.slug)}"${state.mode === 'feed' && feed.slug === state.slug ? ' class="active" aria-current="true"' : ''}>
         ${escapeHtml(feed.title)}
       </button>
     </li>`).join('');
-  for (const button of $$('#feeds button')) button.onclick = () => selectFeed(button.dataset.slug);
+  $('#feeds').querySelector('[data-recent]').onclick = () => selectRecent();
+  for (const button of $$('#feeds button[data-slug]')) button.onclick = () => selectFeed(button.dataset.slug);
 }
 
 function renderItems() {
@@ -171,13 +178,14 @@ function renderItems() {
       rows.push(`<li class="day"><button type="button" data-day="${dayIndex}" aria-expanded="true">${escapeHtml(label)}</button></li>`);
     }
     const title = item.title || 'Untitled';
-    const summary = usefulSummary(item, title);
+    const summary = rowSummary(item, title);
+    const source = state.mode === 'recent' && item.feedLabel ? `<span class="row-source">${escapeHtml(item.feedLabel)}</span> ` : '';
     const unread = !read.has(item.id);
     const classes = `row${state.selected === index ? ' active' : ''}`;
     rows.push(`
       <li>
         <button type="button" class="${classes}" data-index="${index}" data-day="${dayIndex}"${unread ? ' data-unread="true"' : ''}>
-          <span class="row-title">${escapeHtml(title)}</span>
+          <span class="row-title">${source}${escapeHtml(title)}</span>
           <time datetime="${escapeHtml(item.published_at)}" title="${escapeHtml(longDate(item.published_at))}">${escapeHtml(clockTime(item.published_at))}</time>
           ${summary ? `<span class="row-summary">${escapeHtml(summary)}</span>` : ''}
         </button>
@@ -199,7 +207,11 @@ function renderArticle(item) {
   const title = item.title || 'Untitled';
   const { article, discussion } = linksFor(item);
   const body = usefulBody(item, title);
-  const feedName = feed?.title || item.feedSlug || state.slug;
+  // A generated summary stands in for a missing body; it is labelled so it is
+  // never mistaken for the publisher's own words.
+  const generated = !body && item.ai_summary ? plainText(item.ai_summary) : '';
+  const feedName = item.feedLabel || feed?.title || item.feedSlug || state.slug;
+  const tags = Array.isArray(item.tags) ? item.tags : [];
   $('#article').innerHTML = `
     <header class="article-head">
       <p class="kicker">
@@ -211,8 +223,13 @@ function renderArticle(item) {
         ${article ? ` <span class="sep">/</span> <a href="${escapeHtml(article)}" target="_blank" rel="noopener noreferrer">original</a>` : ''}
         ${discussion ? ` <span class="sep">/</span> <a href="${escapeHtml(discussion)}" target="_blank" rel="noopener noreferrer">comments</a>` : ''}
       </p>
+      ${tags.length ? `<p class="tags">${tags.map((tag) => state.mode === 'feed'
+        ? `<button type="button" class="tag" data-tag="${escapeHtml(tag)}" title="filter this feed by tag">${escapeHtml(tag)}</button>`
+        : `<span class="tag static">${escapeHtml(tag)}</span>`).join('')}</p>` : ''}
     </header>
-    <div class="article-body">${body ? escapeHtml(body) : '<p class="note">No body text in the feed.</p>'}</div>`;
+    <div class="article-body">${body ? escapeHtml(body) : (generated ? escapeHtml(generated) : '<p class="note">No body text in the feed.</p>')}</div>
+    ${generated ? '<p class="ai-note">generated summary</p>' : ''}`;
+  for (const button of $$('#article .tag[data-tag]')) button.onclick = () => selectTag(button.dataset.tag);
 }
 
 async function renderDigest(slug) {
@@ -236,11 +253,18 @@ async function renderDigest(slug) {
 }
 
 function renderFeedLinks() {
-  $('#feed-links').innerHTML = `
+  if (state.mode === 'recent') {
+    $('#feed-links').innerHTML = '<span class="filter-label">last 48 hours</span>';
+    return;
+  }
+  const filter = state.tag ? `<button type="button" id="clear-tag" class="tag" title="clear the tag filter">${escapeHtml(state.tag)} ✕</button>` : '';
+  $('#feed-links').innerHTML = `${filter}
     <a href="/feeds/${encodeURIComponent(state.slug)}.rss">rss</a>
     <a href="/feeds/${encodeURIComponent(state.slug)}.json">json</a>
     <button type="button" id="digest">digest</button>`;
   $('#digest').onclick = () => renderDigest(state.slug);
+  const clear = $('#clear-tag');
+  if (clear) clear.onclick = () => selectTag('');
 }
 
 // ---------------------------------------------------------------- actions
@@ -260,16 +284,28 @@ async function loadFeeds() {
 async function loadItems(slug, { quiet = false } = {}) {
   const note = $('#items-note');
   const previous = state.selected === null ? null : state.items[state.selected]?.id;
+  const recent = state.mode === 'recent';
   try {
-    const page = await api(`/api/v1/feeds/${encodeURIComponent(slug)}/items?limit=60`);
-    // Stamp the feed on every item so the reading pane never has to guess which
-    // feed an article came from after the selection moves on.
-    state.items = (page.items || []).map((item) => ({ ...item, feedSlug: slug }));
+    let items;
+    if (recent) {
+      const rows = await api(`/api/v1/recent?hours=${state.hours}&limit=60`);
+      items = rows.map((row) => ({ ...row, feedSlug: row.feed, feedLabel: row.feed_title }));
+    } else {
+      const tag = state.tag ? `&tag=${encodeURIComponent(state.tag)}` : '';
+      const page = await api(`/api/v1/feeds/${encodeURIComponent(slug)}/items?limit=60${tag}`);
+      const feed = currentFeed();
+      // Stamp the feed on every item so the reading pane never has to guess which
+      // feed an article came from after the selection moves on.
+      items = (page.items || []).map((item) => ({ ...item, feedSlug: slug, feedLabel: feed?.title || slug }));
+    }
+    state.items = items;
     state.selected = previous ? state.items.findIndex((item) => item.id === previous) : null;
     if (state.selected === -1) state.selected = null;
     renderItems();
     note.hidden = state.items.length > 0;
-    if (!state.items.length) note.textContent = 'No items yet. sidefeed fetches sources on a timer.';
+    if (!state.items.length) note.textContent = recent
+      ? 'Nothing published in the last two days.'
+      : (state.tag ? `No items tagged “${state.tag}”.` : 'No items yet. sidefeed fetches sources on a timer.');
   } catch (error) {
     if (quiet) return;
     state.items = [];
@@ -279,7 +315,40 @@ async function loadItems(slug, { quiet = false } = {}) {
   }
 }
 
+/// Everything public from the last day or two, ranked across feeds. This is the
+/// "what is worth a look" view rather than one feed at a time.
+async function selectRecent() {
+  state.mode = 'recent';
+  state.tag = '';
+  state.selected = null;
+  state.items = [];
+  renderItems();
+  renderFeeds();
+  document.body.dataset.view = 'list';
+  $('#feed-title').textContent = 'recent';
+  $('#feed-sub').textContent = 'across every feed, newest and most varied first';
+  $('#feed-sub').hidden = false;
+  $('#items-note').hidden = true;
+  renderFeedLinks();
+  if (state.stream) { state.stream.close(); state.stream = null; }
+  await loadItems('');
+}
+
+/// Narrow the current feed to one derived tag.
+function selectTag(tag) {
+  if (state.mode !== 'feed') return;
+  state.tag = tag;
+  state.selected = null;
+  const feed = currentFeed();
+  $('#feed-sub').textContent = tag ? `tag: ${tag}` : (feed?.description || '');
+  $('#feed-sub').hidden = !tag && !feed?.description;
+  renderFeedLinks();
+  loadItems(state.slug, { quiet: true });
+}
+
 async function selectFeed(slug) {
+  state.mode = 'feed';
+  state.tag = '';
   state.slug = slug;
   state.selected = null;
   // Empty the list before fetching: rows from the previous feed must not stay
@@ -320,7 +389,7 @@ function subscribe(slug) {
   if (state.stream) { state.stream.close(); state.stream = null; }
   if (!('EventSource' in window)) return;
   const stream = new EventSource(`/api/v1/feeds/${encodeURIComponent(slug)}/stream`);
-  stream.addEventListener('item', () => { if (state.slug === slug) loadItems(slug, { quiet: true }); });
+  stream.addEventListener('item', () => { if (state.mode === 'feed' && state.slug === slug) loadItems(slug, { quiet: true }); });
   stream.onerror = () => { /* EventSource reconnects on its own */ };
   state.stream = stream;
 }
@@ -346,4 +415,4 @@ document.addEventListener('keydown', (event) => {
 });
 
 loadFeeds();
-setInterval(() => { if (state.slug && document.visibilityState === 'visible') loadItems(state.slug, { quiet: true }); }, 300000);
+setInterval(() => { if (document.visibilityState === 'visible' && (state.slug || state.mode === 'recent')) loadItems(state.slug, { quiet: true }); }, 300000);

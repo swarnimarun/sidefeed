@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod api;
 pub mod config;
+pub mod enrich;
 pub mod error;
 pub mod federation;
 pub mod ingest;
@@ -18,6 +19,9 @@ pub struct AppState {
     pub store: Store,
     pub http: Client,
     pub events: broadcast::Sender<Item>,
+    /// Bounded cache of derived artifacts. Deliberately the only thing about
+    /// enrichment that lives in memory; everything else stays on disk.
+    pub atoms: Arc<enrich::AtomCache>,
 }
 
 impl AppState {
@@ -32,6 +36,6 @@ impl AppState {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let (events, _) = broadcast::channel(256);
-        Ok(Self { config: Arc::new(config), store, http, events })
+        Ok(Self { config: Arc::new(config), store, http, events, atoms: Arc::new(enrich::AtomCache::default()) })
     }
 }

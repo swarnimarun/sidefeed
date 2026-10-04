@@ -40,3 +40,36 @@ fn public_visibility() -> String { "public".into() }
 #[derive(Debug, Serialize)]
 pub struct Page<T> { pub items: Vec<T>, pub next_cursor: Option<String> }
 
+/// Whatever an enricher derived for one item. Small by construction: a couple of
+/// tags and at most a few sentences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Atoms {
+    #[serde(default)] pub tags: Vec<String>,
+    #[serde(default)] pub summary: Option<String>,
+}
+
+/// An item plus its derived artifacts. Flattened so every existing consumer of
+/// an item keeps working; the reader reads `tags` and `ai_summary`.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrichedItem {
+    #[serde(flatten)] pub item: Item,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub ai_summary: Option<String>,
+}
+
+impl EnrichedItem {
+    pub fn new(item: Item, atoms: Atoms) -> Self {
+        Self { item, tags: atoms.tags, ai_summary: atoms.summary }
+    }
+}
+
+/// An item with the feed it came from, for cross-feed listings where the caller
+/// has no slug to look up.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct ItemWithFeed {
+    #[sqlx(flatten)]
+    pub item: Item,
+    pub feed_slug: String,
+    pub feed_title: String,
+}
+

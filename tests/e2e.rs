@@ -1,13 +1,19 @@
 use std::{net::SocketAddr, time::Duration};
 use axum::{body::{to_bytes, Body}, http::{header, Request, StatusCode}, Router};
 use serde_json::{json, Value};
-use sidefeed::{api, config::Config, model::NewItem, AppState};
+use sidefeed::{api, config::{Config, EnrichConfig}, model::NewItem, AppState};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-async fn fixture() -> (Router, AppState, TempDir) { fixture_with(None).await }
+async fn fixture() -> (Router, AppState, TempDir) { fixture_with(None, EnrichConfig::default()).await }
 
-async fn fixture_with(web_dir: Option<std::path::PathBuf>) -> (Router, AppState, TempDir) {
+/// Same instance with local enrichment switched on, so tests exercise the
+/// heuristic provider without any network or model files.
+async fn fixture_with_enrichment() -> (Router, AppState, TempDir) {
+    fixture_with(None, EnrichConfig { provider: "heuristic".into(), ..EnrichConfig::default() }).await
+}
+
+async fn fixture_with(web_dir: Option<std::path::PathBuf>, enrich: EnrichConfig) -> (Router, AppState, TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let database_url = format!("sqlite://{}?mode=rwc", directory.path().join("sidefeed.db").display());
     let config = Config {
@@ -23,6 +29,7 @@ async fn fixture_with(web_dir: Option<std::path::PathBuf>) -> (Router, AppState,
         embedding_url: None,
         embedding_token: None,
         embedding_provider: "disabled".into(),
+        enrich,
         web_dir,
     };
     let state = AppState::new(config).await.unwrap();
@@ -146,7 +153,7 @@ async fn web_dir_overrides_assets_and_picks_up_edits_without_a_restart() {
     let web = tempfile::tempdir().unwrap();
     std::fs::write(web.path().join("index.html"), "<!doctype html><title>first-marker</title>").unwrap();
     std::fs::write(web.path().join("app.js"), "/* overridden by the operator */").unwrap();
-    let (app, _, _directory) = fixture_with(Some(web.path().to_path_buf())).await;
+    let (app, _, _directory) = fixture_with(Some(web.path().to_path_buf()), EnrichConfig::default()).await;
 
     let first = app.clone().oneshot(request("GET", "/", None, false)).await.unwrap();
     assert!(String::from_utf8(to_bytes(first.into_body(), 1024 * 1024).await.unwrap().to_vec()).unwrap().contains("first-marker"));
@@ -164,4 +171,56 @@ async fn web_dir_overrides_assets_and_picks_up_edits_without_a_restart() {
     assert_eq!(styles.status(), StatusCode::OK);
     assert!(styles.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/css"));
     assert!(!to_bytes(styles.into_body(), 2 * 1024 * 1024).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn enrichment_stores_tags_and_summaries_and_serves_them() {
+    let (app, state, _directory) = fixture_with_enrichment().await;
+    let source = state.store.create_source("https://example.com/gfx.xml", "rss", Some("Graphics")).await.unwrap();
+    let created = app.clone().oneshot(request("POST", "/api/v1/feeds", Some(json!({"slug":"gfx","title":"Graphics","public":true})), true)).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let attached = app.clone().oneshot(request("POST", &format!("/api/v1/feeds/gfx/sources/{}", source.id), None, true)).await.unwrap();
+    assert_eq!(attached.status(), StatusCode::NO_CONTENT);
+
+    state.store.upsert_item(Some(&source.id), &NewItem {
+        external_id: "gfx-1".into(), url: Some("https://example.com/gfx-1".into()),
+        title: Some("Bindingless rendering with a compact descriptor".into()),
+        summary: Some("A descriptor layout keeps the pipeline simple".into()),
+        content: Some("Descriptors keep pipelines coherent. The descriptor index stays compact, and the descriptor table is what the shader reads. Compact descriptors reduce bandwidth, and the pipeline stays coherent because the descriptor layout is stable.".into()),
+        author: Some("Someone".into()), published_at: "2026-10-04T10:00:00Z".into(),
+        tags: vec![], raw: None, visibility: "public".into(),
+    }).await.unwrap();
+
+    let enriched = sidefeed::enrich::enrich_batch(&state).await.unwrap();
+    assert!(enriched >= 1, "the worker should have enriched the new item");
+
+    let items = app.clone().oneshot(request("GET", "/api/v1/feeds/gfx/items", None, false)).await.unwrap();
+    assert_eq!(items.status(), StatusCode::OK);
+    let body = json_body(items).await;
+    let first = &body["items"][0];
+    assert!(!first["tags"].as_array().expect("tags array").is_empty(), "expected tags: {first}");
+    assert!(first["ai_summary"].is_string(), "expected a generated summary: {first}");
+    assert_eq!(first["title"], "Bindingless rendering with a compact descriptor", "item fields stay top level");
+
+    // The tag index and the tag filter both read the stored artifacts.
+    let index = app.clone().oneshot(request("GET", "/api/v1/feeds/gfx/tags", None, false)).await.unwrap();
+    assert_eq!(index.status(), StatusCode::OK);
+    let index = json_body(index).await;
+    let tag = index[0]["tag"].as_str().expect("a tag").to_string();
+    assert!(index[0]["count"].as_u64().unwrap_or(0) >= 1);
+
+    let filtered = app.clone().oneshot(request("GET", &format!("/api/v1/feeds/gfx/items?tag={tag}"), None, false)).await.unwrap();
+    assert_eq!(json_body(filtered).await["items"].as_array().unwrap().len(), 1, "tag filter narrows the page");
+    let missing = app.oneshot(request("GET", "/api/v1/feeds/gfx/items?tag=nothingmatchesthis", None, false)).await.unwrap();
+    assert_eq!(json_body(missing).await["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn enrichment_cache_never_grows_past_its_cap() {
+    let (_app, state, _directory) = fixture_with_enrichment().await;
+    let cap = state.config.enrich.cache_entries;
+    for index in 0..(cap + 25) {
+        state.atoms.put(&format!("item-{index}"), sidefeed::model::Atoms { tags: vec!["x".into()], summary: None }, cap).await;
+    }
+    assert!(state.atoms.len().await <= cap, "cache held {} entries for a cap of {cap}", state.atoms.len().await);
 }

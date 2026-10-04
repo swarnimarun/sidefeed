@@ -1,8 +1,8 @@
 use chrono::Utc;
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 use uuid::Uuid;
-use crate::{error::{Error, Result}, model::{Feed, Item, NewItem, Peer, Source}};
+use crate::{error::{Error, Result}, model::{Atoms, Feed, Item, ItemWithFeed, NewItem, Peer, Source}};
 
 #[derive(Clone)]
 pub struct Store { pool: SqlitePool }
@@ -94,10 +94,94 @@ impl Store {
     }
 
     pub async fn feed_items(&self, slug: &str, limit: u32, cursor: Option<&str>) -> Result<Vec<Item>> {
+        self.feed_items_tagged(slug, limit, cursor, None).await
+    }
+
+    /// Same listing, optionally narrowed to one derived tag.
+    pub async fn feed_items_tagged(&self, slug: &str, limit: u32, cursor: Option<&str>, tag: Option<&str>) -> Result<Vec<Item>> {
         let feed = self.feed(slug).await?;
-        let mut items: Vec<Item> = sqlx::query_as("SELECT i.* FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND i.published_at<? ORDER BY i.published_at DESC,i.id DESC LIMIT ?")
-            .bind(&feed.id).bind(cursor.unwrap_or("9999-12-31T23:59:59Z")).bind(limit).fetch_all(&self.pool).await?;
+        let cursor = cursor.unwrap_or("9999-12-31T23:59:59Z");
+        let mut items: Vec<Item> = match tag {
+            Some(tag) => sqlx::query_as("SELECT i.* FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND i.published_at<? AND EXISTS(SELECT 1 FROM item_tags t WHERE t.item_id=i.id AND t.tag=?) ORDER BY i.published_at DESC,i.id DESC LIMIT ?")
+                .bind(&feed.id).bind(cursor).bind(tag).bind(limit).fetch_all(&self.pool).await?,
+            None => sqlx::query_as("SELECT i.* FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND i.published_at<? ORDER BY i.published_at DESC,i.id DESC LIMIT ?")
+                .bind(&feed.id).bind(cursor).bind(limit).fetch_all(&self.pool).await?,
+        };
         items.retain(|i| matches_filter(&feed, i)); Ok(items)
+    }
+
+    // ------------------------------------------------------------ derived artifacts
+    // Tags and generated summaries live on disk next to the items they describe.
+    // `model` records which enricher produced a row, so changing the model is a
+    // new name rather than a migration.
+
+    pub async fn put_atoms(&self, item_id: &str, model: &str, atoms: &Atoms) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        // The summary row doubles as the "processed" marker, so it is written
+        // even when the item had nothing worth summarising. Otherwise a
+        // link-only item would be reconsidered on every worker pass forever.
+        sqlx::query("INSERT INTO item_enrichments(item_id,kind,model,value,created_at) VALUES(?,'summary',?,?,?) ON CONFLICT(item_id,kind,model) DO UPDATE SET value=excluded.value,created_at=excluded.created_at")
+            .bind(item_id).bind(model).bind(atoms.summary.as_deref().unwrap_or("")).bind(&now).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM item_tags WHERE item_id=? AND model=?").bind(item_id).bind(model).execute(&mut *tx).await?;
+        for tag in atoms.tags.iter().take(12) {
+            sqlx::query("INSERT OR IGNORE INTO item_tags(item_id,tag,model,created_at) VALUES(?,?,?,?)")
+                .bind(item_id).bind(tag).bind(model).bind(&now).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn atoms(&self, item_id: &str, model: &str) -> Result<Atoms> {
+        let summary: Option<String> = sqlx::query_scalar("SELECT value FROM item_enrichments WHERE item_id=? AND kind='summary' AND model=?")
+            .bind(item_id).bind(model).fetch_optional(&self.pool).await?;
+        let tags: Vec<String> = sqlx::query_scalar("SELECT tag FROM item_tags WHERE item_id=? AND model=? ORDER BY tag")
+            .bind(item_id).bind(model).fetch_all(&self.pool).await?;
+        Ok(Atoms { tags, summary: summary.filter(|text| !text.is_empty()) })
+    }
+
+    /// One round trip for a whole page: no per-item query in the render path.
+    pub async fn atoms_for(&self, item_ids: &[String], model: &str) -> Result<HashMap<String, Atoms>> {
+        let mut result: HashMap<String, Atoms> = item_ids.iter().map(|id| (id.clone(), Atoms::default())).collect();
+        if item_ids.is_empty() { return Ok(result); }
+        let placeholders = vec!["?"; item_ids.len()].join(",");
+
+        let tag_sql = format!("SELECT item_id,tag FROM item_tags WHERE model=? AND item_id IN ({placeholders}) ORDER BY tag");
+        let mut query = sqlx::query_as::<_, (String, String)>(&tag_sql).bind(model);
+        for id in item_ids { query = query.bind(id); }
+        for (item_id, tag) in query.fetch_all(&self.pool).await? {
+            if let Some(atoms) = result.get_mut(&item_id) { atoms.tags.push(tag); }
+        }
+
+        let summary_sql = format!("SELECT item_id,value FROM item_enrichments WHERE kind='summary' AND model=? AND item_id IN ({placeholders})");
+        let mut query = sqlx::query_as::<_, (String, String)>(&summary_sql).bind(model);
+        for id in item_ids { query = query.bind(id); }
+        for (item_id, summary) in query.fetch_all(&self.pool).await? {
+            if let Some(atoms) = result.get_mut(&item_id) { atoms.summary = Some(summary); }
+        }
+        Ok(result)
+    }
+
+    /// Items this model has not processed yet, newest first. Processing is
+    /// marked by the summary row, so an item that yields nothing is not retried.
+    pub async fn items_missing_atoms(&self, model: &str, limit: u32) -> Result<Vec<Item>> {
+        Ok(sqlx::query_as("SELECT i.* FROM items i WHERE NOT EXISTS(SELECT 1 FROM item_enrichments e WHERE e.item_id=i.id AND e.kind='summary' AND e.model=?) ORDER BY i.published_at DESC LIMIT ?")
+            .bind(model).bind(limit).fetch_all(&self.pool).await?)
+    }
+
+    /// Tag counts across one feed, most frequent first. Powers the tag list and
+    /// the reader's tag filter.
+    pub async fn feed_tags(&self, slug: &str, limit: u32) -> Result<Vec<(String, i64)>> {
+        Ok(sqlx::query_as("SELECT t.tag, COUNT(*) AS uses FROM item_tags t JOIN items i ON i.id=t.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.slug=? GROUP BY t.tag ORDER BY uses DESC, t.tag LIMIT ?")
+            .bind(slug).bind(limit).fetch_all(&self.pool).await?)
+    }
+
+    /// Public items published inside a window, across every public feed. One row
+    /// per item even when several feeds carry it, so the caller can rank across
+    /// sources without duplicates.
+    pub async fn recent_items(&self, since: &str, limit: u32) -> Result<Vec<ItemWithFeed>> {
+        Ok(sqlx::query_as("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.public=1 AND i.visibility='public' AND i.published_at>=? GROUP BY i.id ORDER BY i.published_at DESC LIMIT ?")
+            .bind(since).bind(limit).fetch_all(&self.pool).await?)
     }
 
     pub async fn search(&self, slug: &str, query: &str, limit: u32) -> Result<Vec<Item>> {

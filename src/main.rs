@@ -12,6 +12,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::new(config).await?;
     let worker_state = state.clone();
     tokio::spawn(async move { ingest::poll_loop(worker_state).await });
+    let enrich_state = state.clone();
+    tokio::spawn(async move { sidefeed::enrich::enrich_loop(enrich_state).await });
     let listener = TcpListener::bind(listen).await?;
     tracing::info!(%listen, "sidefeed listening");
     axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown_signal()).await?;
