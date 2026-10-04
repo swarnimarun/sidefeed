@@ -44,6 +44,12 @@ pub async fn poll_source(state: &AppState, source: &Source) -> Result<usize> {
 }
 
 async fn poll_source_inner(state: &AppState, source: &Source) -> Result<usize> {
+    // ---- lane-ingest: kind dispatch (Tasks 3-4) ----
+    // ActivityPub sources poll outboxes through `ap`; webhook sources are
+    // push-only (ingress stores their items), so a poll is a no-op rather
+    // than a fetch error. `raw-json` dispatch lands in Task 4.
+    if source.kind == "activitypub" { return crate::ap::poll_actor(state, source).await; }
+    if source.kind == "webhook" { return Ok(0); }
     let mut url = Url::parse(&source.url).map_err(|e| Error::Invalid(format!("invalid source URL: {e}")))?;
     let mut response = None;
     for hop in 0..=5 {
@@ -135,7 +141,7 @@ fn normalize_entry(entry: &Entry) -> NewItem {
 /// A feed's own date and where it came from. Prefer the posted date, fall back
 /// to last-modified, and only then to the fetch time — recorded as `fetched` so
 /// the reader can label it instead of showing it as the post date.
-fn dated(published: Option<String>, updated: Option<String>) -> (String, String) {
+pub(crate) fn dated(published: Option<String>, updated: Option<String>) -> (String, String) {
     if let Some(value) = published { return (value, "published".into()); }
     if let Some(value) = updated { return (value, "updated".into()); }
     (Utc::now().to_rfc3339(), "fetched".into())
@@ -229,22 +235,15 @@ fn parse_activitypub(value: Value, base: &Url) -> Result<(Option<String>, Vec<Ne
         .cloned().unwrap_or_else(|| vec![value.clone()]);
     let mut items = Vec::new();
     for activity in list {
+        // The object mapping lives in `ap` so the generic ingest path and the
+        // outbox poller can never drift; this keeps the outer list handling.
         let object = activity.get("object").filter(|v| v.is_object()).unwrap_or(&activity);
-        let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
-        if !matches!(kind, "Note" | "Article" | "Page" | "Event") { continue; }
-        let id = string_field(object, "id").or_else(|| string_field(object, "url")).unwrap_or_else(|| base.to_string());
-        let actor = object.get("attributedTo").and_then(|v| v.as_str()).or_else(|| activity.get("actor").and_then(Value::as_str)).map(str::to_owned);
-        let tags = object.get("tag").and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.get("name").and_then(Value::as_str).map(str::to_owned)).collect();
-        let (published_at, date_source) = dated(string_field(object, "published"), string_field(object, "updated"));
-        items.push(NewItem { external_id: id, url: string_field(object, "url"), title: string_field(object, "name"), summary: string_field(object, "summary"),
-            content: string_field(object, "content"), author: actor,
-            published_at, date_source,
-            tags, raw: Some(activity), visibility: "public".into() });
+        if let Some(item) = crate::ap::normalize_object(object, &activity, base) { items.push(item); }
     }
     Ok((title, items))
 }
 
-fn string_field(value: &Value, key: &str) -> Option<String> {
+pub(crate) fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(|v| v.as_str().map(str::to_owned).or_else(|| v.get("href").and_then(Value::as_str).map(str::to_owned)))
 }
 

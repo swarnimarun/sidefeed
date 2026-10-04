@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod ap;
 pub mod api;
 // --- lane-authsec: scoped keys + rate limits (Tasks 1 + 8) ---
 pub mod auth;

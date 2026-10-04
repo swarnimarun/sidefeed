@@ -14,6 +14,16 @@ async fn fixture_with_enrichment() -> (Router, AppState, TempDir) {
 }
 
 async fn fixture_with(web_dir: Option<std::path::PathBuf>, enrich: EnrichConfig) -> (Router, AppState, TempDir) {
+    fixture_with_ap_flag(web_dir, enrich, false).await
+}
+
+/// Same instance with the ActivityPub actor/inbox routes enabled, so tests can
+/// exercise the node actor document without touching the network.
+async fn fixture_with_ap() -> (Router, AppState, TempDir) {
+    fixture_with_ap_flag(None, EnrichConfig::default(), true).await
+}
+
+async fn fixture_with_ap_flag(web_dir: Option<std::path::PathBuf>, enrich: EnrichConfig, ap_enabled: bool) -> (Router, AppState, TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let database_url = format!("sqlite://{}?mode=rwc", directory.path().join("sidefeed.db").display());
     let config = Config {
@@ -29,6 +39,7 @@ async fn fixture_with(web_dir: Option<std::path::PathBuf>, enrich: EnrichConfig)
         embedding_url: None,
         embedding_token: None,
         embedding_provider: "disabled".into(),
+        ap_enabled,
         enrich,
         web_dir,
         // --- lane-authsec: new config (Tasks 1 + 8, additive) ---
@@ -69,7 +80,7 @@ async fn webhook_channel_ingests_a_signed_batch() {
     let created = app.clone().oneshot(request("POST", "/api/v1/feeds",
         Some(json!({"slug":"ops","title":"Ops","public":true})), true)).await.unwrap();
     assert_eq!(created.status(), StatusCode::CREATED);
-    let _ = state.store.attach_source("ops", &source.id).await.unwrap();
+    state.store.attach_source("ops", &source.id).await.unwrap();
     let channel = state.store.create_channel("deploys", &sidefeed::channels::hash_secret("s3cret"), Some(&source.id)).await.unwrap();
     assert_eq!(channel.slug, "deploys");
     let body = json!({"items":[{"id":"d1","title":"deploy v42","url":"https://ex.example/d/42"}]});
@@ -77,6 +88,75 @@ async fn webhook_channel_ingests_a_signed_batch() {
     assert_eq!(res.status(), StatusCode::ACCEPTED);
     let items = state.store.feed_items("ops", 10, None).await.unwrap();
     assert_eq!(items.len(), 1);
+}
+
+// ---- Task 3: ActivityPub read-plus-follow (lane-ingest) ----
+#[test]
+fn parses_create_and_announce_from_an_outbox_page() {
+    let page = json!({
+        "orderedItems": [
+            {"type":"Create","actor":"https://m.example/users/jo",
+             "object":{"type":"Note","id":"https://m.example/p/1",
+               "content":"<p>hello</p>","published":"2026-10-01T00:00:00Z"}},
+            {"type":"Announce","actor":"https://m.example/users/jo",
+             "object":{"type":"Note","id":"https://m.example/p/2",
+               "content":"boosted","published":"2026-10-02T00:00:00Z"}}
+        ]
+    });
+    let items = sidefeed::ap::items_from_outbox(&page,
+        &"https://m.example/users/jo/outbox".parse().unwrap()).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].external_id, "https://m.example/p/1");
+}
+
+#[tokio::test]
+async fn activitypub_routes_are_inert_without_the_flag() {
+    let (app, _, _d) = fixture().await;
+    for (method, uri) in [
+        ("GET", "/ap/v1/actor"),
+        ("GET", "/.well-known/webfinger?resource=acct:sidefeed@sidefeed.test"),
+        ("POST", "/ap/v1/inbox"),
+    ] {
+        let res = app.clone().oneshot(request(method, uri, None, false)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{method} {uri} must be inert");
+    }
+    // The follow route is management, not serving: it stays authenticated and
+    // fails on the missing source config, never on the flag.
+    let denied = app.oneshot(request("POST", "/api/v1/sources/nope/follow", None, false)).await.unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn node_actor_and_webfinger_serve_when_enabled() {
+    let (app, _, _d) = fixture_with_ap().await;
+    let actor = app.clone().oneshot(request("GET", "/ap/v1/actor", None, false)).await.unwrap();
+    assert_eq!(actor.status(), StatusCode::OK);
+    let actor = json_body(actor).await;
+    assert_eq!(actor["id"], "http://sidefeed.test/ap/v1/actor");
+    assert!(actor["publicKey"]["publicKeyPem"].as_str().unwrap().contains("BEGIN PUBLIC KEY"));
+
+    let finger = app.clone().oneshot(request("GET",
+        "/.well-known/webfinger?resource=acct:sidefeed@sidefeed.test", None, false)).await.unwrap();
+    assert_eq!(finger.status(), StatusCode::OK);
+    assert_eq!(json_body(finger).await["links"][0]["href"], "http://sidefeed.test/ap/v1/actor");
+
+    // An unsigned delivery never reaches the network: no Signature header, no fetch.
+    let inbox = app.oneshot(request("POST", "/ap/v1/inbox",
+        Some(json!({"type": "Create", "object": {"type": "Note"}})), false)).await.unwrap();
+    assert_eq!(inbox.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn accept_marks_a_followed_source() {
+    let (_app, state, _d) = fixture().await;
+    let source = state.store.create_source("https://m.example/users/jo", "activitypub", None).await.unwrap();
+    state.store.put_source_config(&source.id, "activitypub",
+        &json!({"actor_url": "https://m.example/users/jo", "following": "requested"}).to_string()).await.unwrap();
+    assert!(sidefeed::ap::mark_following_for_actor(&state.store, "https://m.example/users/jo").await.unwrap());
+    let config = state.store.source_config(&source.id).await.unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&config.config_json).unwrap()["following"], json!(true));
+    // A stranger's Accept matches nothing and changes nothing.
+    assert!(!sidefeed::ap::mark_following_for_actor(&state.store, "https://m.example/users/stranger").await.unwrap());
 }
 
 async fn json_body(response: axum::response::Response) -> Value {

@@ -406,80 +406,102 @@ impl Store {
     pub async fn channel(&self, slug: &str) -> Result<WebhookChannel> {
         sqlx::query_as("SELECT * FROM webhook_channels WHERE slug=?").bind(slug).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)
     }
+
+    // --- lane-authsec: scoped API keys (Task 1) ---
+    /// Store a new key; only the hash is persisted. `prefix` is the first 8
+    /// characters of the plaintext, shown in listings so an operator can tell
+    /// keys apart without ever seeing the secret again.
+    pub async fn create_key(
+        &self,
+        name: &str,
+        prefix: &str,
+        token_hash: &str,
+        scopes: &[String],
+    ) -> Result<crate::model::ApiKey> {
+        let id = Uuid::new_v4().to_string();
+        let scopes_json =
+            serde_json::to_string(scopes).map_err(|e| Error::Invalid(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO api_keys(id,name,prefix,token_hash,scopes_json,revoked,created_at) VALUES(?,?,?,?,?,0,?)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(prefix)
+        .bind(token_hash)
+        .bind(&scopes_json)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(map_unique)?;
+        self.key_by_id(&id).await
+    }
+
+    async fn key_by_id(&self, id: &str) -> Result<crate::model::ApiKey> {
+        sqlx::query_as("SELECT * FROM api_keys WHERE id=?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(Error::NotFound)
+    }
+
+    /// Look up a live key by its token hash. Unknown hashes and revoked keys
+    /// both surface as `Unauthorized` so callers cannot probe for key ids.
+    pub async fn key_by_hash(&self, token_hash: &str) -> Result<crate::model::ApiKey> {
+        let key: Option<crate::model::ApiKey> =
+            sqlx::query_as("SELECT * FROM api_keys WHERE token_hash=?")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+        match key {
+            Some(found) if !found.revoked => Ok(found),
+            _ => Err(Error::Unauthorized),
+        }
+    }
+
+    /// Revoke a key; later uses fail closed as `Unauthorized`.
+    pub async fn revoke_key(&self, id: &str) -> Result<()> {
+        let result = sqlx::query("UPDATE api_keys SET revoked=1 WHERE id=?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Record a successful use, so operators can spot stale keys.
+    pub async fn touch_key(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE api_keys SET last_used_at=? WHERE id=?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    // --- end lane-authsec Task 1 ---
 +
-+    // --- lane-authsec: scoped API keys (Task 1) ---
-+    /// Store a new key; only the hash is persisted. `prefix` is the first 8
-+    /// characters of the plaintext, shown in listings so an operator can tell
-+    /// keys apart without ever seeing the secret again.
-+    pub async fn create_key(
-+        &self,
-+        name: &str,
-+        prefix: &str,
-+        token_hash: &str,
-+        scopes: &[String],
-+    ) -> Result<crate::model::ApiKey> {
-+        let id = Uuid::new_v4().to_string();
-+        let scopes_json =
-+            serde_json::to_string(scopes).map_err(|e| Error::Invalid(e.to_string()))?;
-+        sqlx::query(
-+            "INSERT INTO api_keys(id,name,prefix,token_hash,scopes_json,revoked,created_at) VALUES(?,?,?,?,?,0,?)",
-+        )
-+        .bind(&id)
-+        .bind(name)
-+        .bind(prefix)
-+        .bind(token_hash)
-+        .bind(&scopes_json)
-+        .bind(Utc::now().to_rfc3339())
-+        .execute(&self.pool)
-+        .await
-+        .map_err(map_unique)?;
-+        self.key_by_id(&id).await
++    // ---- lane-ingest: node identity + AP source lookup (Task 3) ----
++    // Tiny key/value store for the node actor: the ed25519 seed and small
++    // flags. One row per key; values are opaque to the store.
++
++    /// Read one node-meta value, if it was stored.
++    pub async fn get_meta(&self, key: &str) -> Result<Option<String>> {
++        Ok(sqlx::query_scalar("SELECT value FROM node_meta WHERE key=?").bind(key).fetch_optional(&self.pool).await?)
 +    }
 +
-+    async fn key_by_id(&self, id: &str) -> Result<crate::model::ApiKey> {
-+        sqlx::query_as("SELECT * FROM api_keys WHERE id=?")
-+            .bind(id)
-+            .fetch_optional(&self.pool)
-+            .await?
-+            .ok_or(Error::NotFound)
-+    }
-+
-+    /// Look up a live key by its token hash. Unknown hashes and revoked keys
-+    /// both surface as `Unauthorized` so callers cannot probe for key ids.
-+    pub async fn key_by_hash(&self, token_hash: &str) -> Result<crate::model::ApiKey> {
-+        let key: Option<crate::model::ApiKey> =
-+            sqlx::query_as("SELECT * FROM api_keys WHERE token_hash=?")
-+                .bind(token_hash)
-+                .fetch_optional(&self.pool)
-+                .await?;
-+        match key {
-+            Some(found) if !found.revoked => Ok(found),
-+            _ => Err(Error::Unauthorized),
-+        }
-+    }
-+
-+    /// Revoke a key; later uses fail closed as `Unauthorized`.
-+    pub async fn revoke_key(&self, id: &str) -> Result<()> {
-+        let result = sqlx::query("UPDATE api_keys SET revoked=1 WHERE id=?")
-+            .bind(id)
-+            .execute(&self.pool)
-+            .await?;
-+        if result.rows_affected() == 0 {
-+            return Err(Error::NotFound);
-+        }
++    /// Insert or replace one node-meta value.
++    pub async fn set_meta(&self, key: &str, value: &str) -> Result<()> {
++        sqlx::query("INSERT INTO node_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
++            .bind(key).bind(value).execute(&self.pool).await?;
 +        Ok(())
 +    }
 +
-+    /// Record a successful use, so operators can spot stale keys.
-+    pub async fn touch_key(&self, id: &str) -> Result<()> {
-+        sqlx::query("UPDATE api_keys SET last_used_at=? WHERE id=?")
-+            .bind(Utc::now().to_rfc3339())
-+            .bind(id)
-+            .execute(&self.pool)
-+            .await?;
-+        Ok(())
++    /// Every source config of one poller kind, so the AP layer can find the
++    // source that follows a given actor without parsing JSON in SQL.
++    pub async fn source_configs_by_kind(&self, kind: &str) -> Result<Vec<SourceConfig>> {
++        Ok(sqlx::query_as("SELECT * FROM source_configs WHERE kind=?").bind(kind).fetch_all(&self.pool).await?)
 +    }
-+    // --- end lane-authsec Task 1 ---
 }
 
 /// Restricts a query that aliases `items` as `i` to a set of derived tags. `all`

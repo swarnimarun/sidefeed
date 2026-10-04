@@ -15,6 +15,10 @@ pub struct Config {
     pub embedding_url: Option<String>,
     pub embedding_token: Option<String>,
     pub embedding_provider: String,
+    /// `1` serves the minimal node actor, WebFinger, and signed inbox needed
+    /// to receive Follow Accepts. `0` (default) leaves those routes inert so a
+    /// node never speaks ActivityPub unless its operator opts in.
+    pub ap_enabled: bool,
     /// Derived-artifact settings: tags and generated summaries.
     pub enrich: EnrichConfig,
     /// Optional directory that overrides the embedded UI assets at runtime.
@@ -93,6 +97,7 @@ impl Config {
             embedding_url: env::var("SIDEFEED_EMBEDDING_URL").ok().filter(|v| !v.is_empty()),
             embedding_token: env::var("SIDEFEED_EMBEDDING_TOKEN").ok().filter(|v| !v.is_empty()),
             embedding_provider: env::var("SIDEFEED_EMBEDDING_PROVIDER").unwrap_or_else(|_| "disabled".into()),
+            ap_enabled: parse_bool("SIDEFEED_AP_ENABLED", false),
             enrich: EnrichConfig::from_env()?,
             web_dir: env::var("SIDEFEED_WEB_DIR").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
             // --- lane-authsec: scoped keys + rate limits (Tasks 1 + 8) ---
@@ -120,3 +125,10 @@ fn parse_bool(name: &str, default: bool) -> bool {
     }
 }
 // --- end lane-authsec Tasks 1+8 ---
++
++// ---- lane-ingest: boolean flags (Task 3) ----
++// Accepts `1`/`true` as on and everything else as off, so an unset or `0`
++// flag keeps the default behaviour.
++fn parse_bool(name: &str, default: bool) -> bool {
++    env::var(name).map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(default)
++}

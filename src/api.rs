@@ -35,6 +35,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sources/{id}/poll", post(poll_source))
         // ---- lane-ingest: signed webhook ingress (Task 2) ----
         .route("/api/v1/ingress/{slug}", post(ingress))
+        // ---- lane-ingest: ActivityPub read-plus-follow (Task 3) ----
+        // The node actor, WebFinger, and inbox are inert 404s unless
+        // SIDEFEED_AP_ENABLED=1; follow is an authenticated management route.
+        .route("/ap/v1/actor", get(node_actor))
+        .route("/ap/v1/inbox", post(ap_inbox))
+        .route("/.well-known/webfinger", get(webfinger))
+        .route("/api/v1/sources/{id}/follow", post(follow_source))
         .route("/api/v1/import/opml", post(import_opml))
         .route("/api/v1/feeds", get(list_feeds).post(create_feed))
         .route("/api/v1/feeds/{slug}/sources/{source_id}", post(attach_source))
@@ -324,10 +331,38 @@ async fn ingress(State(state): State<AppState>, Path(slug): Path<String>, header
     }
     (StatusCode::ACCEPTED, Json(json!({"accepted": accepted}))).into_response()
 }
--async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{authorize(&state,&headers)?;Ok(Json(state.store.sources().await?))}
--async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{authorize(&state,&headers)?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
-+async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{crate::auth::require_scope(&state,&headers,"read:private").await?;Ok(Json(state.store.sources().await?))}
-+async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{crate::auth::require_scope(&state,&headers,"write:private").await?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
+
+// ---- lane-ingest: ActivityPub read-plus-follow (Task 3) ----
+// Read-plus-follow only: this node serves one actor document plus WebFinger
+// so remote servers can address it, and an inbox that understands exactly
+// two activities (Accept{Follow} and Create). No multi-user actors, no
+// relays. Everything here 404s unless SIDEFEED_AP_ENABLED=1.
+async fn node_actor(State(state): State<AppState>) -> Result<Json<Value>> {
+    if !state.config.ap_enabled { return Err(Error::NotFound); }
+    Ok(Json(crate::ap::node_actor_doc(&state).await?))
+}
+
+#[derive(Deserialize)] struct WebfingerQuery { resource: String }
+async fn webfinger(State(state): State<AppState>, Query(query): Query<WebfingerQuery>) -> Result<Json<Value>> {
+    if !state.config.ap_enabled { return Err(Error::NotFound); }
+    Ok(Json(crate::ap::webfinger_doc(&state, &query.resource)?))
+}
+
+async fn ap_inbox(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Result<Json<Value>> {
+    if !state.config.ap_enabled { return Err(Error::NotFound); }
+    Ok(Json(crate::ap::handle_inbox(&state, &headers, &body).await?))
+}
+
+/// Send a signed Follow to the actor behind one `activitypub` source.
+async fn follow_source(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<Value>> {
+    authorize(&state, &headers)?;
+    let source = state.store.source(&id).await?;
+    Ok(Json(crate::ap::send_follow(&state, &source).await?))
+}
++-async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{authorize(&state,&headers)?;Ok(Json(state.store.sources().await?))}
++-async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{authorize(&state,&headers)?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
+++async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{crate::auth::require_scope(&state,&headers,"read:private").await?;Ok(Json(state.store.sources().await?))}
+++async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{crate::auth::require_scope(&state,&headers,"write:private").await?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
 async fn import_opml(State(state):State<AppState>,headers:HeaderMap,body:Bytes)->Result<(StatusCode,Json<Value>)>{
     crate::auth::require_scope(&state,&headers,"write:private").await?;let feeds=ingest::parse_opml(&body)?;let mut created=Vec::new();let mut skipped=0;
     for (url,title) in feeds {let parsed=url::Url::parse(&url).map_err(|e|Error::Invalid(format!("invalid OPML URL: {e}")))?;ingest::validate_public_url(&parsed).await?;match state.store.create_source(parsed.as_str(),"auto",title.as_deref()).await{Ok(s)=>created.push(s),Err(Error::Conflict(_))=>skipped+=1,Err(e)=>return Err(e)}}
