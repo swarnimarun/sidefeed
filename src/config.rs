@@ -19,6 +19,16 @@ pub struct Config {
     pub enrich: EnrichConfig,
     /// Optional directory that overrides the embedded UI assets at runtime.
     pub web_dir: Option<PathBuf>,
+    // --- lane-authsec: scoped keys + rate limits (Tasks 1 + 8) ---
+    /// `1` requires scoped keys for management even when no admin token is set.
+    pub api_keys_enabled: bool,
+    /// `1` makes bookmark writes require a key with `bookmarks:write`.
+    pub bookmarks_require_auth: bool,
+    /// Global per-IP sustained rate (requests/second).
+    pub rate_rps: u32,
+    /// Global per-IP burst size.
+    pub rate_burst: u32,
+    // --- end lane-authsec Tasks 1+8 ---
 }
 
 /// Local text enrichment settings. Artifacts are stored on disk in SQLite;
@@ -85,6 +95,12 @@ impl Config {
             embedding_provider: env::var("SIDEFEED_EMBEDDING_PROVIDER").unwrap_or_else(|_| "disabled".into()),
             enrich: EnrichConfig::from_env()?,
             web_dir: env::var("SIDEFEED_WEB_DIR").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
+            // --- lane-authsec: scoped keys + rate limits (Tasks 1 + 8) ---
+            api_keys_enabled: parse_bool("SIDEFEED_API_KEYS_ENABLED", false),
+            bookmarks_require_auth: parse_bool("SIDEFEED_BOOKMARKS_REQUIRE_AUTH", false),
+            rate_rps: parse("SIDEFEED_RATE_LIMIT_RPS", "10")?,
+            rate_burst: parse("SIDEFEED_RATE_LIMIT_BURST", "30")?,
+            // --- end lane-authsec Tasks 1+8 ---
         })
     }
 }
@@ -93,3 +109,14 @@ fn parse<T: FromStr>(name: &str, default: &str) -> Result<T> {
     env::var(name).unwrap_or_else(|_| default.to_owned()).parse()
         .map_err(|_| Error::Config(format!("invalid {name}")))
 }
+
+// --- lane-authsec: scoped keys + rate limits (Tasks 1 + 8) ---
+/// Parse `1/true/yes/on` (case-insensitive) as true; anything else is false.
+/// Missing vars yield `default`, so unset behaviour never changes.
+fn parse_bool(name: &str, default: bool) -> bool {
+    match env::var(name) {
+        Ok(value) => matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => default,
+    }
+}
+// --- end lane-authsec Tasks 1+8 ---

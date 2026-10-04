@@ -28,3 +28,29 @@ SQLite contains fetched content, peer secrets, and optional embedding vectors.
 Back up the database with SQLite's online backup tooling or while Sidefeed is
 stopped, and protect the file as a secret-bearing asset.
 
+## Scoped API keys (lane-authsec, Task 1)
+
+Management routes accept either the admin bearer or a scoped API key.
+Mint with `POST /api/v1/keys` (admin-only); the plaintext `sf_…` token is
+shown once and only its SHA-256 hash is stored. Revoke with
+`DELETE /api/v1/keys/{id}`; revoked or unknown tokens fail closed as `401`,
+a live key without the required scope fails as `403`.
+
+Scopes are opaque strings. Management reads require `read:private`, writes
+require `write:private`, and bookmark writes (when gated) require
+`bookmarks:write`. The admin bearer passes every scope check.
+
+- `SIDEFEED_API_KEYS_ENABLED=1` requires scoped keys for management even when
+  no admin token is set. At `0` (default) the localhost default stays open.
+- `SIDEFEED_BOOKMARKS_REQUIRE_AUTH=1` routes bookmark writes through
+  `require_scope(_, "bookmarks:write")`. At `0` (default) bookmarks stay a
+  bounded token-free write.
+
+## Rate limits (lane-authsec, Tasks 1 + 8)
+
+Key management (`POST /api/v1/keys`, `DELETE /api/v1/keys/{id}`) has a strict
+per-IP bucket: 1 rps sustained, burst 10. The global governor defaults to
+`SIDEFEED_RATE_LIMIT_RPS=10` sustained and `SIDEFEED_RATE_LIMIT_BURST=30`
+burst per IP (single-process in-memory buckets; no multi-replica sharing).
+Exceeding either returns `429` with a `Retry-After` header. Nothing is
+exempt; `/healthz` is cheap and limiting it is intentional.

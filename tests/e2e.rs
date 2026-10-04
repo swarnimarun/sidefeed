@@ -31,6 +31,14 @@ async fn fixture_with(web_dir: Option<std::path::PathBuf>, enrich: EnrichConfig)
         embedding_provider: "disabled".into(),
         enrich,
         web_dir,
+        // --- lane-authsec: new config (Tasks 1 + 8, additive) ---
+        api_keys_enabled: false,
+        bookmarks_require_auth: false,
+        // Tight test governor so the 429 test trips in milliseconds;
+        // production defaults stay 10/30 via Config::from_env.
+        rate_rps: 5,
+        rate_burst: 20,
+        // --- end lane-authsec ---
     };
     let state = AppState::new(config).await.unwrap();
     (api::router(state.clone()), state, directory)
@@ -329,3 +337,37 @@ async fn a_rewritten_item_link_updates_in_place_instead_of_violating_the_unique_
     assert_eq!(updated.url.as_deref(), Some("https://example.com/new"));
     assert_eq!(updated.title.as_deref(), Some("Rewritten"));
 }
+
+// --- lane-authsec: scoped keys + rate limits (Task 1) ---
+fn keyed(method: &str, uri: &str, body: Option<Value>, token: &str) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    if body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    builder
+        .body(body.map(|value| Body::from(value.to_string())).unwrap_or_else(Body::empty))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn scoped_keys_gate_management_and_support_revocation() {
+    let (app, state, _d) = fixture().await;
+    // Mint a read-only key via the admin token.
+    let minted = app.clone().oneshot(request("POST", "/api/v1/keys",
+        Some(json!({"name":"reader","scopes":["read:private"]})), true)).await.unwrap();
+    assert_eq!(minted.status(), StatusCode::CREATED);
+    let body = json_body(minted).await;
+    let token = body["token"].as_str().expect("one-time plaintext").to_string();
+    // Read-only key cannot create feeds.
+    let denied = app.clone().oneshot(keyed("POST", "/api/v1/feeds",
+        Some(json!({"slug":"x","title":"x"})), &token)).await.unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    // Revoke, then even reads fail.
+    state.store.revoke_key(body["id"].as_str().unwrap()).await.unwrap();
+    let gone = app.oneshot(keyed("GET", "/api/v1/sources", None, &token)).await.unwrap();
+    assert_eq!(gone.status(), StatusCode::UNAUTHORIZED);
+}
+// --- end lane-authsec Task 1 ---

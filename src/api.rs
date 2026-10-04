@@ -7,8 +7,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use crate::{error::{Error, Result}, ingest, model::{EnrichedItem, Feed, Item, ItemWithFeed, Page, Source}, AppState};
+// --- lane-authsec: scoped keys + rate limits (Tasks 1 + 8) ---
+use crate::ratelimit::RateLimitLayer;
+// --- end lane-authsec Tasks 1+8 ---
 
 pub fn router(state: AppState) -> Router {
+    // --- lane-authsec: key routes carry their own strict limiter (Task 1) ---
+    // 1 rps sustained, burst 10: mint/revoke stay usable but cannot be probed.
+    let keys = Router::new()
+        .route("/api/v1/keys", post(create_key))
+        .route("/api/v1/keys/{id}", axum::routing::delete(delete_key))
+        .layer(RateLimitLayer::strict())
+        .with_state(state.clone());
+    // --- end lane-authsec Task 1 ---
     Router::new()
         .route("/docs", get(api_docs)).route("/openapi.json", get(openapi))
         .route("/healthz", get(health)).route("/readyz", get(ready))
@@ -31,10 +42,15 @@ pub fn router(state: AppState) -> Router {
         .route("/feeds/{file}", get(feed_output))
         .route("/feeds/{slug}/newsletter", get(newsletter))
         .route("/feeds/{slug}/thread.json", get(social_thread))
-        .merge(crate::federation::router()).merge(crate::ai::router()).merge(crate::enrich::router())
+        .merge(keys).merge(crate::federation::router()).merge(crate::ai::router()).merge(crate::enrich::router())
         // Anything the API did not claim belongs to the reader, including its
         // client-side routes.
         .fallback(serve_ui)
+        // --- lane-authsec: global governor (Task 8 rate-limit half) ---
+        // Per-IP token bucket; 429 + Retry-After when the burst is spent.
+        // Exempt nothing; /healthz is cheap and limiting it is documented.
+        .layer(RateLimitLayer::global(state.config.rate_rps, state.config.rate_burst))
+        // --- end lane-authsec Task 8 ---
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT,Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http()).with_state(state)
@@ -219,8 +235,8 @@ async fn list_bookmarks(State(state):State<AppState>)->Result<Json<Vec<SavedHit>
 
 /// How many items one node will save. Bounds a token-free write route.
 const BOOKMARK_LIMIT: i64 = 2000;
-async fn add_bookmark(State(state):State<AppState>,Path(id):Path<String>)->Result<StatusCode>{state.store.bookmark(&id,BOOKMARK_LIMIT).await?;Ok(StatusCode::NO_CONTENT)}
-async fn remove_bookmark(State(state):State<AppState>,Path(id):Path<String>)->Result<StatusCode>{state.store.unbookmark(&id).await?;Ok(StatusCode::NO_CONTENT)}
+async fn add_bookmark(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<StatusCode>{if state.config.bookmarks_require_auth{crate::auth::require_scope(&state,&headers,"bookmarks:write").await?;}state.store.bookmark(&id,BOOKMARK_LIMIT).await?;Ok(StatusCode::NO_CONTENT)}
+async fn remove_bookmark(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<StatusCode>{if state.config.bookmarks_require_auth{crate::auth::require_scope(&state,&headers,"bookmarks:write").await?;}state.store.unbookmark(&id).await?;Ok(StatusCode::NO_CONTENT)}
 
 #[derive(Deserialize)] struct SimilarQuery {limit:Option<u32>}
 
@@ -274,21 +290,21 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Value>> { state.sto
 #[derive(Deserialize)] struct SourceInput { url: String, #[serde(default="auto_kind")] kind: String, title: Option<String> }
 fn auto_kind() -> String { "auto".into() }
 async fn create_source(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<SourceInput>) -> Result<(StatusCode,Json<Source>)> {
-    authorize(&state,&headers)?; let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
+    crate::auth::require_scope(&state,&headers,"write:private").await?; let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
     Ok((StatusCode::CREATED,Json(state.store.create_source(url.as_str(),&input.kind,input.title.as_deref()).await?)))
 }
-async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{authorize(&state,&headers)?;Ok(Json(state.store.sources().await?))}
-async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{authorize(&state,&headers)?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
+async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{crate::auth::require_scope(&state,&headers,"read:private").await?;Ok(Json(state.store.sources().await?))}
+async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{crate::auth::require_scope(&state,&headers,"write:private").await?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
 async fn import_opml(State(state):State<AppState>,headers:HeaderMap,body:Bytes)->Result<(StatusCode,Json<Value>)>{
-    authorize(&state,&headers)?;let feeds=ingest::parse_opml(&body)?;let mut created=Vec::new();let mut skipped=0;
+    crate::auth::require_scope(&state,&headers,"write:private").await?;let feeds=ingest::parse_opml(&body)?;let mut created=Vec::new();let mut skipped=0;
     for (url,title) in feeds {let parsed=url::Url::parse(&url).map_err(|e|Error::Invalid(format!("invalid OPML URL: {e}")))?;ingest::validate_public_url(&parsed).await?;match state.store.create_source(parsed.as_str(),"auto",title.as_deref()).await{Ok(s)=>created.push(s),Err(Error::Conflict(_))=>skipped+=1,Err(e)=>return Err(e)}}
     Ok((StatusCode::CREATED,Json(json!({"created":created,"skipped":skipped}))))
 }
 
 #[derive(Deserialize)] struct FeedInput { slug:String,title:String,description:Option<String>,include_terms:Option<String>,exclude_terms:Option<String>,#[serde(default)]public:bool }
-async fn create_feed(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<FeedInput>)->Result<(StatusCode,Json<Feed>)>{authorize(&state,&headers)?;validate_slug(&input.slug)?;let feed=state.store.create_feed(&input.slug,&input.title,input.description.as_deref(),input.include_terms.as_deref(),input.exclude_terms.as_deref(),input.public).await?;Ok((StatusCode::CREATED,Json(feed)))}
-async fn list_feeds(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Feed>>>{authorize(&state,&headers)?;Ok(Json(state.store.feeds().await?))}
-async fn attach_source(State(state):State<AppState>,headers:HeaderMap,Path((slug,source_id)):Path<(String,String)>)->Result<StatusCode>{authorize(&state,&headers)?;state.store.attach_source(&slug,&source_id).await?;Ok(StatusCode::NO_CONTENT)}
+async fn create_feed(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<FeedInput>)->Result<(StatusCode,Json<Feed>)>{crate::auth::require_scope(&state,&headers,"write:private").await?;validate_slug(&input.slug)?;let feed=state.store.create_feed(&input.slug,&input.title,input.description.as_deref(),input.include_terms.as_deref(),input.exclude_terms.as_deref(),input.public).await?;Ok((StatusCode::CREATED,Json(feed)))}
+async fn list_feeds(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Feed>>>{crate::auth::require_scope(&state,&headers,"read:private").await?;Ok(Json(state.store.feeds().await?))}
+async fn attach_source(State(state):State<AppState>,headers:HeaderMap,Path((slug,source_id)):Path<(String,String)>)->Result<StatusCode>{crate::auth::require_scope(&state,&headers,"write:private").await?;state.store.attach_source(&slug,&source_id).await?;Ok(StatusCode::NO_CONTENT)}
 
 #[derive(Deserialize)] struct PageQuery {limit:Option<u32>,cursor:Option<String>,tag:Option<String>,matching:Option<String>,host:Option<String>}
 
@@ -365,8 +381,14 @@ async fn social_thread(State(state):State<AppState>,headers:HeaderMap,Path(slug)
     access_feed(&state,&headers,&slug).await?;let items=state.store.feed_items(&slug,q.limit.unwrap_or(10).clamp(1,25),None).await?;Ok(Json(json!({"generated_at":Utc::now().to_rfc3339(),"posts":items.into_iter().map(|i|{let title=i.title.unwrap_or_else(||"New item".into());let url=i.url.unwrap_or_default();let mut text=format!("{}\n{}",title,url);if text.chars().count()>280{text=text.chars().take(279).collect();text.push('…');}json!({"text":text,"item_id":i.id})}).collect::<Vec<_>>() })))
 }
 
-pub(crate) async fn access_feed(state:&AppState,headers:&HeaderMap,slug:&str)->Result<Feed>{let feed=state.store.feed(slug).await?;if !feed.public{authorize(state,headers)?;}Ok(feed)}
-pub(crate) fn authorize(state:&AppState,headers:&HeaderMap)->Result<()>{let Some(expected)=&state.config.admin_token else{return Ok(())};let supplied=headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer "));if supplied==Some(expected.as_str()){Ok(())}else{Err(Error::Unauthorized)}}
+pub(crate) async fn access_feed(state:&AppState,headers:&HeaderMap,slug:&str)->Result<Feed>{let feed=state.store.feed(slug).await?;if !feed.public{crate::auth::require_scope(state,headers,"read:private").await.map(|_| ())?;}Ok(feed)}
+pub(crate) fn authorize(state:&AppState,headers:&HeaderMap)->Result<()>{let Some(expected)=&state.config.admin_token else{if state.config.api_keys_enabled{return Err(Error::Unauthorized);}return Ok(());};let supplied=headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer "));if supplied==Some(expected.as_str()){Ok(())}else{Err(Error::Unauthorized)}}
+
+// --- lane-authsec: scoped key management routes (Task 1, admin-only) ---
+#[derive(Deserialize)] struct KeyInput { name: String, #[serde(default)] scopes: Vec<String> }
+async fn create_key(State(state):State<AppState>,headers:HeaderMap,Json(input):Json<KeyInput>)->Result<(StatusCode,Json<Value>)>{authorize(&state,&headers)?;let scopes: Vec<String> = input.scopes.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();let (token,key)=crate::auth::mint_key(&state,&input.name,&scopes).await?;Ok((StatusCode::CREATED,Json(json!({"id":key.id,"name":key.name,"prefix":key.prefix,"scopes":key.scopes(),"created_at":key.created_at,"token":token}))))}
+async fn delete_key(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<StatusCode>{authorize(&state,&headers)?;state.store.revoke_key(&id).await?;Ok(StatusCode::NO_CONTENT)}
+// --- end lane-authsec Task 1 ---
 fn validate_slug(slug:&str)->Result<()>{if slug.is_empty()||slug.len()>64||!slug.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'-'){Err(Error::Invalid("slug must contain lowercase letters, digits, or hyphens".into()))}else{Ok(())}}
 fn esc(value:&str)->String{value.replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;").replace('"',"&quot;").replace('\'',"&#39;")}
 fn with_type(body:String,content_type:&'static str)->Response{with_bytes(body.into_bytes(),content_type)}

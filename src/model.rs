@@ -86,3 +86,48 @@ pub struct SavedItem {
     pub saved_at: String,
 }
 
+// --- lane-authsec: scoped API keys (Task 1) ---
+/// A scoped API key. `token_hash` is never serialized; only the prefix and
+/// metadata leave the server. Scopes are stored as JSON in `scopes_json`.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ApiKey {
+    pub id: String,
+    pub name: String,
+    pub prefix: String,
+    #[serde(skip_serializing)]
+    pub token_hash: String,
+    pub scopes_json: String,
+    pub revoked: bool,
+    pub last_used_at: Option<String>,
+    pub created_at: String,
+}
+
+impl ApiKey {
+    /// Scopes granted to this key, parsed from storage.
+    pub fn scopes(&self) -> Vec<String> {
+        serde_json::from_str(&self.scopes_json).unwrap_or_default()
+    }
+    /// Whether this key carries `scope`.
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes().iter().any(|s| s == scope)
+    }
+    /// Synthetic key for an admin-bearer request; passes every scope check.
+    pub fn superuser() -> Self {
+        Self {
+            id: "superuser".into(),
+            name: "admin".into(),
+            prefix: String::new(),
+            token_hash: String::new(),
+            scopes_json: "[]".into(),
+            revoked: false,
+            last_used_at: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+    /// True for the synthetic admin key.
+    pub fn is_superuser(&self) -> bool {
+        self.id == "superuser"
+    }
+}
+// --- end lane-authsec Task 1 ---
+

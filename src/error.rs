@@ -10,6 +10,9 @@ pub enum Error {
     #[error("invalid input: {0}")] Invalid(String),
     #[error("not found")] NotFound,
     #[error("unauthorized")] Unauthorized,
+    // --- lane-authsec: scoped keys (Task 1) ---
+    #[error("forbidden")] Forbidden,
+    // --- end lane-authsec Task 1 ---
     #[error("conflict: {0}")] Conflict(String),
     #[error("internal error: {0}")] Internal(String),
 }
@@ -20,6 +23,9 @@ impl IntoResponse for Error {
             Self::Invalid(_) => StatusCode::BAD_REQUEST,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            // --- lane-authsec: scoped keys (Task 1) ---
+            Self::Forbidden => StatusCode::FORBIDDEN,
+            // --- end lane-authsec Task 1 ---
             Self::Conflict(_) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };

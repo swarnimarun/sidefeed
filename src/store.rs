@@ -366,6 +366,80 @@ impl Store {
         let rows: Vec<(String,String)> = sqlx::query_as("SELECT item_id,vector_json FROM embeddings WHERE provider=?").bind(provider).fetch_all(&self.pool).await?;
         rows.into_iter().map(|(id,json)| serde_json::from_str(&json).map(|v| (id,v)).map_err(|e| Error::Internal(e.to_string()))).collect()
     }
+
+    // --- lane-authsec: scoped API keys (Task 1) ---
+    /// Store a new key; only the hash is persisted. `prefix` is the first 8
+    /// characters of the plaintext, shown in listings so an operator can tell
+    /// keys apart without ever seeing the secret again.
+    pub async fn create_key(
+        &self,
+        name: &str,
+        prefix: &str,
+        token_hash: &str,
+        scopes: &[String],
+    ) -> Result<crate::model::ApiKey> {
+        let id = Uuid::new_v4().to_string();
+        let scopes_json =
+            serde_json::to_string(scopes).map_err(|e| Error::Invalid(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO api_keys(id,name,prefix,token_hash,scopes_json,revoked,created_at) VALUES(?,?,?,?,?,0,?)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(prefix)
+        .bind(token_hash)
+        .bind(&scopes_json)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(map_unique)?;
+        self.key_by_id(&id).await
+    }
+
+    async fn key_by_id(&self, id: &str) -> Result<crate::model::ApiKey> {
+        sqlx::query_as("SELECT * FROM api_keys WHERE id=?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(Error::NotFound)
+    }
+
+    /// Look up a live key by its token hash. Unknown hashes and revoked keys
+    /// both surface as `Unauthorized` so callers cannot probe for key ids.
+    pub async fn key_by_hash(&self, token_hash: &str) -> Result<crate::model::ApiKey> {
+        let key: Option<crate::model::ApiKey> =
+            sqlx::query_as("SELECT * FROM api_keys WHERE token_hash=?")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+        match key {
+            Some(found) if !found.revoked => Ok(found),
+            _ => Err(Error::Unauthorized),
+        }
+    }
+
+    /// Revoke a key; later uses fail closed as `Unauthorized`.
+    pub async fn revoke_key(&self, id: &str) -> Result<()> {
+        let result = sqlx::query("UPDATE api_keys SET revoked=1 WHERE id=?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Record a successful use, so operators can spot stale keys.
+    pub async fn touch_key(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE api_keys SET last_used_at=? WHERE id=?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    // --- end lane-authsec Task 1 ---
 }
 
 /// Restricts a query that aliases `items` as `i` to a set of derived tags. `all`
