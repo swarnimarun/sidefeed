@@ -125,7 +125,26 @@ FTS/vector results at `/api/v1/feeds/{slug}/semantic?q=terms`.
 | `SIDEFEED_MAX_RESPONSE_BYTES` | `5242880` | Origin/peer body limit |
 | `SIDEFEED_PEER_MAX_ITEMS` | `500` | Maximum peer batch |
 | `SIDEFEED_RETENTION_DAYS` | `90` | Delete older cached items; `0` keeps all |
-| `SIDEFEED_EMBEDDING_PROVIDER` | `disabled` | `disabled`, `remote`, or `burn-local` |
+| `SIDEFEED_EMBEDDING_PROVIDER` | `disabled` | `disabled`, `remote`, `burn-local`, or `onnx-local` |
+| `SIDEFEED_ONNX_EMBED_MODEL` | unset | Path to MiniLM `.onnx` for `onnx-local` |
+| `SIDEFEED_AP_ENABLED` | `0` | Serve node actor, WebFinger, and signed inbox |
+| `SIDEFEED_API_KEYS_ENABLED` | `0` | Require scoped keys even without admin token |
+| `SIDEFEED_BOOKMARKS_REQUIRE_AUTH` | `0` | Gate bookmarks behind `bookmarks:write` |
+| `SIDEFEED_RATE_LIMIT_RPS` | `10` | Global per-IP sustained rate |
+| `SIDEFEED_RATE_LIMIT_BURST` | `30` | Global per-IP burst |
+| `SIDEFEED_ENRICH_PROVIDER` | `disabled` | `disabled`, `heuristic`, or `openai` |
+| `SIDEFEED_ENRICH_URL` | unset | Chat endpoint for `openai` enrichment |
+| `SIDEFEED_ENRICH_MODEL` | unset | Chat model for `openai` enrichment |
+
+Scoped API keys (`POST /api/v1/keys`, `DELETE /api/v1/keys/{id}`) gate management
+reads (`read:private`) and writes (`write:private`); the admin bearer passes every
+scope. Webhook ingress (`POST /api/v1/ingress/{slug}`) is token-free by channel
+secret (Bearer or HMAC), capped at 100 items. ActivityPub is read-plus-follow only:
+the node polls outboxes and sends signed Follows when `SIDEFEED_AP_ENABLED=1`; the
+inbox verifies ed25519 `Signature` headers and tracks `Accept{Follow}`/`Create`.
+`GET /api/v1/ai/status` reports live enrich/embedding providers and backlogs, and
+`POST /api/v1/feeds/{slug}/ask` answers feed-scoped questions extractively when no
+chat model is configured.
 
 See [PLAN.md](PLAN.md) for delivery boundaries and [SECURITY.md](SECURITY.md)
 before exposing a node publicly.
