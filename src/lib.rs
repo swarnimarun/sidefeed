@@ -6,6 +6,8 @@ pub mod auth;
 pub mod ratelimit;
 // --- end lane-authsec Tasks 1+8 ---
 pub mod channels;
+// ---- Task 6 (ask): feed-scoped Q&A with extractive fallback. ----
+pub mod ask;
 pub mod config;
 pub mod enrich;
 pub mod error;

@@ -419,6 +419,36 @@ async fn ai_status_reports_providers_and_backlog() {
 }
 // ---- end Task 5 ----
 
+// ---- Task 6 (feed ask endpoint with extractive fallback) ----
+async fn seed_two_items(state: &AppState) {
+    let source = state.store.create_source("https://example.com/gfx.xml", "rss", Some("Graphics")).await.unwrap();
+    state.store.create_feed("gfx", "Graphics", None, None, None, true).await.unwrap();
+    state.store.attach_source("gfx", &source.id).await.unwrap();
+    for (index, (title, body)) in [
+        ("Bindingless rendering with a compact descriptor", "A descriptor layout keeps the pipeline simple. Descriptors keep pipelines coherent."),
+        ("Unrelated bread baking", "Flour, water, ovens, and patience."),
+    ].into_iter().enumerate() {
+        let mut item = test_item(&format!("ask-{index}"));
+        item.title = Some(title.into());
+        item.summary = Some(body.into());
+        item.content = Some(body.into());
+        state.store.upsert_item(Some(&source.id), &item).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ask_answers_from_the_index_without_a_model() {
+    let (app, state, _d) = fixture_with_enrichment().await;
+    seed_two_items(&state).await;
+    let res = app.oneshot(request("POST", "/api/v1/feeds/gfx/ask",
+        Some(json!({"q":"descriptor layout"})), false)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert!(!body["answer"].as_str().unwrap_or("").is_empty());
+    assert!(!body["citations"].as_array().unwrap().is_empty());
+}
+// ---- end Task 6 ----
+
 #[tokio::test]
 async fn enrichment_cache_never_grows_past_its_cap() {
     let (_app, state, _directory) = fixture_with_enrichment().await;

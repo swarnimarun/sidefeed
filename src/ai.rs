@@ -51,7 +51,8 @@ impl EmbeddingProvider for BurnLocalProvider {
     }
 }
 
-fn provider(state:&AppState)->Result<Arc<dyn EmbeddingProvider>>{
+// ---- Task 6 (ask): crate-visible so ask can re-rank with live vectors. ----
+pub(crate) fn provider(state:&AppState)->Result<Arc<dyn EmbeddingProvider>>{
     match state.config.embedding_provider.as_str(){
         "remote"=>{let url=state.config.embedding_url.clone().ok_or_else(||Error::Config("SIDEFEED_EMBEDDING_URL is required for remote embeddings".into()))?;Ok(Arc::new(RemoteProvider{client:state.http.clone(),url,token:state.config.embedding_token.clone()}))}
         #[cfg(feature="burn-local")]

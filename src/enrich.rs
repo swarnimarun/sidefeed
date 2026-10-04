@@ -35,6 +35,14 @@ pub trait Enricher: Send + Sync {
         let _ = label;
         Ok(heuristic_digest(sample))
     }
+    // ---- Task 6 (ask): shared chat helper so ask reuses the
+    // openai-compatible chat path. Extractive providers decline (`None`) and
+    // the caller falls back to quoting; generative ones reply with prose.
+    async fn answer(&self, feed_title: &str, q: &str, excerpts: &str) -> Result<Option<String>> {
+        let _ = (feed_title, q, excerpts);
+        Ok(None)
+    }
+    // ---- end Task 6 ----
 }
 
 pub fn router() -> Router<AppState> {
@@ -120,7 +128,8 @@ fn link_only(text: &str) -> bool {
 /// Cheap sentence split: enough for feeds, no parser and no dependencies. A
 /// decimal point or an abbreviation is not a sentence end, so "Rust 1.100.0,
 /// the following changes" stays one sentence instead of becoming "0, the …".
-fn sentences(text: &str) -> Vec<&str> {
+// ---- Task 6 (ask): shared with the extractive ask fallback. ----
+pub(crate) fn sentences(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -240,7 +249,8 @@ pub struct OpenAiEnricher {
 impl OpenAiEnricher {
     /// One chat completion, returned as text. Shared with research prompts so
     /// both features speak to the same endpoint in the same way.
-    pub async fn chat(&self, system: &str, user: &str) -> Result<String> {
+    // ---- Task 6 (ask): crate-visible so ask reuses this chat path. ----
+    pub(crate) async fn chat(&self, system: &str, user: &str) -> Result<String> {
         let mut request = self.client.post(&self.url).json(&json!({
             "model": self.model,
             "temperature": 0,
@@ -260,6 +270,14 @@ impl OpenAiEnricher {
 #[async_trait]
 impl Enricher for OpenAiEnricher {
     fn name(&self) -> &'static str { "openai-v1" }
+    // ---- Task 6 (ask): one pinned chat call over the retrieved excerpts. ----
+    async fn answer(&self, feed_title: &str, q: &str, excerpts: &str) -> Result<Option<String>> {
+        let system = "Answer the question using ONLY the excerpts below. Do not use outside knowledge. \
+            If the excerpts do not contain an answer, say so plainly. Reply in at most 200 words.";
+        let user = format!("Feed: {feed_title}\n\nExcerpts:\n{excerpts}\n\nQuestion: {q}");
+        Ok(Some(self.chat(system, &user).await?))
+    }
+    // ---- end Task 6 ----
     async fn enrich(&self, text: &str) -> Result<Atoms> {
         let plain = plain_text(text);
         if plain.len() < 40 { return Ok(Atoms::default()); }

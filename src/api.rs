@@ -51,7 +51,7 @@ pub fn router(state: AppState) -> Router {
         .route("/feeds/{file}", get(feed_output))
         .route("/feeds/{slug}/newsletter", get(newsletter))
         .route("/feeds/{slug}/thread.json", get(social_thread))
-        .merge(keys).merge(crate::federation::router()).merge(crate::ai::router()).merge(crate::enrich::router())
+        .merge(keys).merge(crate::federation::router()).merge(crate::ai::router()).merge(crate::enrich::router()).merge(crate::ask::router()) // ---- Task 6 (ask) ----
         // Anything the API did not claim belongs to the reader, including its
         // client-side routes.
         .fallback(serve_ui)
