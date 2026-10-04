@@ -5,7 +5,9 @@ use sidefeed::{api, config::Config, model::NewItem, AppState};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-async fn fixture() -> (Router, AppState, TempDir) {
+async fn fixture() -> (Router, AppState, TempDir) { fixture_with(None).await }
+
+async fn fixture_with(web_dir: Option<std::path::PathBuf>) -> (Router, AppState, TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let database_url = format!("sqlite://{}?mode=rwc", directory.path().join("sidefeed.db").display());
     let config = Config {
@@ -21,6 +23,7 @@ async fn fixture() -> (Router, AppState, TempDir) {
         embedding_url: None,
         embedding_token: None,
         embedding_provider: "disabled".into(),
+        web_dir,
     };
     let state = AppState::new(config).await.unwrap();
     (api::router(state.clone()), state, directory)
@@ -44,17 +47,32 @@ async fn ui_health_and_openapi_are_served() {
     let home = app.clone().oneshot(request("GET", "/", None, false)).await.unwrap();
     assert_eq!(home.status(), StatusCode::OK);
     let html = String::from_utf8(to_bytes(home.into_body(), 1024 * 1024).await.unwrap().to_vec()).unwrap();
-    assert!(html.contains("One calm feed"));
+    assert!(html.contains("sidefeed"), "the reader shell renders");
+    // The reader is public and read-only: it must never collect the admin token.
+    assert!(!html.contains("type=\"password\""), "the reader UI must not ask for a token");
+    assert!(!html.contains("localStorage.setItem('sidefeed-token'"), "the reader UI must not store a token");
+    // Panes are collapsible and the interface ships the self-hosted font.
+    assert!(html.contains("toggle-feeds") && html.contains("toggle-items") && html.contains("toggle-article"));
+    assert!(html.contains("/styles.css"));
 
     let health = app.clone().oneshot(request("GET", "/healthz", None, false)).await.unwrap();
     assert_eq!(health.status(), StatusCode::OK);
     assert_eq!(json_body(health).await["status"], "ok");
 
-    let spec = app.oneshot(request("GET", "/openapi.json", None, false)).await.unwrap();
+    let spec = app.clone().oneshot(request("GET", "/openapi.json", None, false)).await.unwrap();
     assert_eq!(spec.status(), StatusCode::OK);
     let spec = json_body(spec).await;
     assert_eq!(spec["openapi"], "3.1.0");
     assert!(spec["paths"]["/api/v1/feeds"].is_object());
+    assert!(spec["paths"]["/api/v1/public/feeds"].is_object());
+
+    // The bundled font is served as bytes, and only allowlisted names resolve.
+    let font = app.clone().oneshot(request("GET", "/fonts/Libron-Regular.woff2", None, false)).await.unwrap();
+    assert_eq!(font.status(), StatusCode::OK);
+    assert_eq!(font.headers()[header::CONTENT_TYPE].to_str().unwrap(), "font/woff2");
+    assert!(to_bytes(font.into_body(), 2 * 1024 * 1024).await.unwrap().len() > 10_000, "the bundled font is served");
+    let unknown = app.oneshot(request("GET", "/fonts/not-a-bundled-font.woff2", None, false)).await.unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND, "only bundled asset names resolve");
 }
 
 #[tokio::test]
@@ -101,4 +119,49 @@ async fn source_to_feed_to_publishing_outputs_works_end_to_end() {
         let body = to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
         assert!(!body.is_empty(), "{path}");
     }
+}
+
+#[tokio::test]
+async fn public_feed_index_is_open_and_excludes_private_feeds() {
+    let (app, _, _directory) = fixture().await;
+    for (slug, public) in [("open", true), ("secret", false)] {
+        let created = app.clone().oneshot(request("POST", "/api/v1/feeds", Some(json!({"slug": slug, "title": slug, "public": public})), true)).await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+    }
+
+    let index = app.clone().oneshot(request("GET", "/api/v1/public/feeds", None, false)).await.unwrap();
+    assert_eq!(index.status(), StatusCode::OK);
+    let body = json_body(index).await;
+    let slugs: Vec<&str> = body.as_array().unwrap().iter().map(|feed| feed["slug"].as_str().unwrap()).collect();
+    assert!(slugs.contains(&"open"), "public feeds are readable without a token");
+    assert!(!slugs.contains(&"secret"), "private feeds never reach the public index");
+    assert!(body[0].get("created_at").is_none(), "the public projection stays minimal");
+
+    let management = app.oneshot(request("GET", "/api/v1/feeds", None, false)).await.unwrap();
+    assert_eq!(management.status(), StatusCode::UNAUTHORIZED, "management listing still needs the token");
+}
+
+#[tokio::test]
+async fn web_dir_overrides_assets_and_picks_up_edits_without_a_restart() {
+    let web = tempfile::tempdir().unwrap();
+    std::fs::write(web.path().join("index.html"), "<!doctype html><title>first-marker</title>").unwrap();
+    std::fs::write(web.path().join("app.js"), "/* overridden by the operator */").unwrap();
+    let (app, _, _directory) = fixture_with(Some(web.path().to_path_buf())).await;
+
+    let first = app.clone().oneshot(request("GET", "/", None, false)).await.unwrap();
+    assert!(String::from_utf8(to_bytes(first.into_body(), 1024 * 1024).await.unwrap().to_vec()).unwrap().contains("first-marker"));
+
+    // Editing the file on disk must show up immediately: no rebuild, no restart.
+    std::fs::write(web.path().join("index.html"), "<!doctype html><title>second-marker</title>").unwrap();
+    let second = app.clone().oneshot(request("GET", "/", None, false)).await.unwrap();
+    assert!(String::from_utf8(to_bytes(second.into_body(), 1024 * 1024).await.unwrap().to_vec()).unwrap().contains("second-marker"));
+
+    let script = app.clone().oneshot(request("GET", "/app.js", None, false)).await.unwrap();
+    assert_eq!(String::from_utf8(to_bytes(script.into_body(), 1024 * 1024).await.unwrap().to_vec()).unwrap(), "/* overridden by the operator */");
+
+    // Assets the directory does not contain still come from the binary.
+    let styles = app.oneshot(request("GET", "/styles.css", None, false)).await.unwrap();
+    assert_eq!(styles.status(), StatusCode::OK);
+    assert!(styles.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/css"));
+    assert!(!to_bytes(styles.into_body(), 2 * 1024 * 1024).await.unwrap().is_empty());
 }

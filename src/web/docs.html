@@ -1,1 +1,93 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sidefeed API</title><link rel="stylesheet" href="/styles.css"></head><body><header><div><a href="/"><span class="mark">S</span><strong>Sidefeed</strong></a></div><nav><a href="/openapi.json">OpenAPI JSON</a></nav></header><main><section class="hero"><p class="eyebrow">OPENAPI 3.1</p><h1>A small API with portable outputs.</h1><p>Management endpoints accept <code>Authorization: Bearer &lt;token&gt;</code>. Public feeds need no token.</p></section><section class="panel docs"><h2>Core resources</h2><table><thead><tr><th>Resource</th><th>Endpoints</th></tr></thead><tbody><tr><td>Sources</td><td><code>GET/POST /api/v1/sources</code><br><code>POST /api/v1/sources/{id}/poll</code></td></tr><tr><td>Feeds</td><td><code>GET/POST /api/v1/feeds</code><br><code>GET /api/v1/feeds/{slug}/items</code></td></tr><tr><td>Search</td><td><code>GET /api/v1/feeds/{slug}/search</code><br><code>GET /api/v1/feeds/{slug}/semantic</code></td></tr><tr><td>Publishing</td><td><code>/feeds/{slug}.rss</code><br><code>/feeds/{slug}.json</code><br><code>/feeds/{slug}/newsletter</code><br><code>/feeds/{slug}/thread.json</code></td></tr><tr><td>Live</td><td><code>GET /api/v1/feeds/{slug}/stream</code></td></tr></tbody></table><p>Download the complete machine-readable <a href="/openapi.json">OpenAPI document</a>.</p></section></main></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>sidefeed api</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <a class="mark" href="/" aria-hidden="true">S</a>
+      <strong>Sidefeed API</strong>
+    </div>
+    <div class="actions">
+      <a class="btn" href="/">Reader</a>
+      <a class="btn" href="/openapi.json">OpenAPI JSON</a>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="hero">
+      <p class="eyebrow">OpenAPI 3.1</p>
+      <h1>Add sources and feeds over HTTP.</h1>
+      <p>
+        The reader at <a href="/">/</a> is read-only. Requests that change state need
+        <code>Authorization: Bearer &lt;token&gt;</code>. Feeds marked public can be read without a token.
+      </p>
+    </section>
+
+    <section class="panel docs">
+      <h2>Endpoints</h2>
+      <table>
+        <thead><tr><th>Area</th><th>Endpoints</th><th>Auth</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Public read</td>
+            <td>
+              <code>GET /api/v1/public/feeds</code><br>
+              <code>GET /api/v1/feeds/{slug}/items</code><br>
+              <code>GET /api/v1/feeds/{slug}/search</code><br>
+              <code>GET /api/v1/feeds/{slug}/stream</code>
+            </td>
+            <td>None for public feeds</td>
+          </tr>
+          <tr>
+            <td>Publishing</td>
+            <td>
+              <code>/feeds/{slug}.rss</code><br>
+              <code>/feeds/{slug}.json</code><br>
+              <code>/feeds/{slug}/newsletter</code><br>
+              <code>/feeds/{slug}/thread.json</code>
+            </td>
+            <td>None for public feeds</td>
+          </tr>
+          <tr>
+            <td>Sources</td>
+            <td>
+              <code>GET/POST /api/v1/sources</code><br>
+              <code>POST /api/v1/sources/{id}/poll</code><br>
+              <code>POST /api/v1/import/opml</code>
+            </td>
+            <td>Bearer token</td>
+          </tr>
+          <tr>
+            <td>Feeds</td>
+            <td>
+              <code>GET/POST /api/v1/feeds</code><br>
+              <code>POST /api/v1/feeds/{slug}/sources/{source_id}</code>
+            </td>
+            <td>Bearer token</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        Adding a feed the reader can show is two calls: create the feed with <code>public: true</code>
+        and connect a source to it. See the <a href="/openapi.json">OpenAPI document</a> for schemas.
+      </p>
+    </section>
+
+    <section class="panel docs">
+      <h2>Example</h2>
+      <p><code>curl -sS -X POST https://your-host/api/v1/sources -H 'authorization: Bearer $TOKEN'
+        -H 'content-type: application/json' -d '{"url":"https://example.com/feed.xml"}'</code></p>
+      <p><code>curl -sS -X POST https://your-host/api/v1/feeds -H 'authorization: Bearer $TOKEN'
+        -H 'content-type: application/json' -d '{"slug":"reading","title":"Reading","public":true}'</code></p>
+    </section>
+  </main>
+
+  <footer>Sidefeed runs on your infrastructure · SQLite-backed · <a href="/healthz">Health</a></footer>
+</body>
+</html>
