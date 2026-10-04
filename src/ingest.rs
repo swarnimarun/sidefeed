@@ -347,6 +347,10 @@ pub(crate) fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(|v| v.as_str().map(str::to_owned).or_else(|| v.get("href").and_then(Value::as_str).map(str::to_owned)))
 }
 
+/// At most this many outlines are accepted from one OPML document; above it
+/// the import is rejected instead of creating an unbounded set of sources.
+const MAX_OPML_SOURCES: usize = 500;
+
 pub fn parse_opml(bytes: &[u8]) -> Result<Vec<(String, Option<String>)>> {
     let mut reader = Reader::from_reader(bytes);
     let mut result = Vec::new();
@@ -359,11 +363,17 @@ pub fn parse_opml(bytes: &[u8]) -> Result<Vec<(String, Option<String>)>> {
                     match attr.key.as_ref() { b"xmlUrl" => url = Some(value), b"title" | b"text" if title.is_none() => title = Some(value), _ => {} }
                 }
                 if let Some(url) = url { result.push((url, title)); }
+                if result.len() > MAX_OPML_SOURCES {
+                    return Err(Error::Invalid("OPML item limit is 500".into()));
+                }
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(Error::Invalid(format!("invalid OPML: {e}"))),
             _ => {}
         }
+    }
+    if result.len() > MAX_OPML_SOURCES {
+        return Err(Error::Invalid("OPML item limit is 500".into()));
     }
     Ok(result)
 }
@@ -447,6 +457,15 @@ mod tests {
     fn parses_opml_urls() {
         let feeds = parse_opml(br#"<opml><body><outline text="Example" xmlUrl="https://example.com/rss"/></body></opml>"#).unwrap();
         assert_eq!(feeds[0].0, "https://example.com/rss");
+    }
+    #[test]
+    fn opml_rejects_more_than_five_hundred_outlines() {
+        let mut doc = String::from("<opml><body>");
+        for i in 0..501 {
+            doc.push_str(&format!(r#"<outline text="f{i}" xmlUrl="https://example.com/{i}.xml"/>"#));
+        }
+        doc.push_str("</body></opml>");
+        assert!(parse_opml(doc.as_bytes()).is_err());
     }
     #[test]
     fn blocks_private_addresses() { assert!(blocked_ip("127.0.0.1".parse().unwrap())); assert!(!blocked_ip("1.1.1.1".parse().unwrap())); }

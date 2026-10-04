@@ -3,8 +3,12 @@
 Sidefeed consumes untrusted documents and should be deployed as an unprivileged
 service. Source and peer URLs are limited to HTTP(S), DNS results are checked
 against private and non-routable address ranges, every redirect is rechecked,
-responses are bounded, and requests time out. Network policy remains a useful
-second layer because DNS can change after resolution.
+responses are bounded, and requests time out. DNS is validated at resolution
+time only; the connection is not pinned to the validated address, so a DNS
+change between check and connect (TOCTOU) could bypass the denylist. Pinning
+the validated IP for the connection was deferred as too invasive for this
+change. Treat network egress policy as a required second layer, not a
+backstop, until pinning lands.
 
 Set `SIDEFEED_ADMIN_TOKEN` on every internet-accessible node. Without it,
 administrative endpoints are intentionally open for single-user localhost

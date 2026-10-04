@@ -94,22 +94,10 @@ pub struct RateLimitService<S> {
 }
 
 fn client_key<B>(req: &Request<B>) -> String {
-    if let Some(forwarded) = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        let first = forwarded.split(',').next().unwrap_or("").trim();
-        if !first.is_empty() {
-            return format!("ip:{first}");
-        }
-    }
-    if let Some(real) = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let real = real.trim();
-        if !real.is_empty() {
-            return format!("ip:{real}");
-        }
-    }
+    // Proxies must be accounted for at the edge: X-Forwarded-For/X-Real-Ip are
+    // client-controlled and rotating them must not buy fresh buckets, so only
+    // the peer address is trusted here. Without one, fall back to the single
+    // global bucket (which is what the `oneshot` test harness exercises).
     if let Some(addr) = req.extensions().get::<axum::extract::ConnectInfo<SocketAddr>>() {
         return format!("ip:{}", addr.0.ip());
     }

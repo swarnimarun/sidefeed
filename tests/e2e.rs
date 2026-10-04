@@ -41,7 +41,7 @@ async fn fixture_with_ap_flag(web_dir: Option<std::path::PathBuf>, enrich: Enric
         embedding_provider: "disabled".into(),
         // ---- Task 5 (onnx-local): no model file in tests; provider stays off.
         onnx_embed_model: None,
-+        ap_enabled,
+        ap_enabled,
         enrich,
         web_dir,
         // --- lane-authsec: new config (Tasks 1 + 8, additive) ---
@@ -588,6 +588,141 @@ async fn scoped_keys_gate_management_and_support_revocation() {
     assert_eq!(gone.status(), StatusCode::UNAUTHORIZED);
 }
 // --- end lane-authsec Task 1 ---
+
+// ---- review security gaps: P0-1 inbox impersonation, P0-2 bookmarks leak ----
+#[tokio::test]
+async fn inbox_rejects_mismatched_keyid_and_actor() {
+    let (app, _, _d) = fixture_with_ap().await;
+    // Attacker signs with their own keyId but claims activity.actor is the victim.
+    // The binding check rejects before any fetch, so no valid signature is needed
+    // to observe the 401; a forged delivery never reaches the store.
+    let body = json!({"type": "Create", "actor": "https://victim.example/users/victim",
+        "object": {"type": "Note", "id": "https://victim.example/p/1", "content": "forged"}});
+    let req = Request::builder().method("POST").uri("/ap/v1/inbox")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("host", "sidefeed.test")
+        .header("date", "Wed, 01 Oct 2026 00:00:00 GMT")
+        .header("digest", "SHA-256=x")
+        .header("signature", "keyId=\"https://attacker.example/users/attacker#main-key\",headers=\"(request-target) host date digest\",signature=\"AAAA\"")
+        .body(Body::from(body.to_string())).unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "mismatched keyId vs actor must be 401");
+}
+
+#[tokio::test]
+async fn bookmarks_exclude_private_feed_items() {
+    let (app, state, _d) = fixture().await;
+    state.store.create_feed("priv", "Priv", None, None, None, false).await.unwrap();
+    state.store.create_feed("pub", "Pub", None, None, None, true).await.unwrap();
+    let priv_source = state.store.create_source("https://example.com/private.xml", "rss", None).await.unwrap();
+    let pub_source = state.store.create_source("https://example.com/pub.xml", "rss", None).await.unwrap();
+    state.store.attach_source("priv", &priv_source.id).await.unwrap();
+    state.store.attach_source("pub", &pub_source.id).await.unwrap();
+    let mk = |ext: &str, vis: &str| NewItem {
+        external_id: ext.into(), url: Some(format!("https://example.com/{ext}")),
+        title: Some(ext.into()), summary: Some("body".into()), content: Some("body".into()),
+        author: None, published_at: "2026-10-04T10:00:00Z".into(), date_source: "published".into(),
+        tags: vec![], raw: None, visibility: vis.into(),
+    };
+    // Private-feed public item, public-feed public item, public-feed private item.
+    let priv_feed_item = state.store.upsert_item(Some(&priv_source.id), &mk("priv-1", "public")).await.unwrap();
+    let pub_item = state.store.upsert_item(Some(&pub_source.id), &mk("pub-1", "public")).await.unwrap();
+    let priv_vis_item = state.store.upsert_item(Some(&pub_source.id), &mk("priv-vis", "private")).await.unwrap();
+    for id in [&priv_feed_item.id, &pub_item.id, &priv_vis_item.id] {
+        let res = app.clone().oneshot(request("POST", &format!("/api/v1/items/{id}/bookmark"), None, false)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    }
+    let saved = app.clone().oneshot(request("GET", "/api/v1/bookmarks", None, false)).await.unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let body = json_body(saved).await;
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|v| v["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&pub_item.id.as_str()), "public item must be listed");
+    assert!(!ids.iter().any(|id| *id == priv_feed_item.id.as_str() || *id == priv_vis_item.id.as_str()),
+        "private-feed/private-visibility items must not leak: {ids:?}");
+}
+
+#[tokio::test]
+async fn similar_on_private_seed_needs_auth() {
+    let (app, state, _d) = fixture_with_enrichment().await;
+    let source = state.store.create_source("https://example.com/s.xml", "rss", None).await.unwrap();
+    state.store.create_feed("pub", "Pub", None, None, None, true).await.unwrap();
+    state.store.attach_source("pub", &source.id).await.unwrap();
+    let mut item = test_item("seed-priv");
+    item.visibility = "private".into();
+    let stored = state.store.upsert_item(Some(&source.id), &item).await.unwrap();
+    let anon = app.clone().oneshot(request("GET", &format!("/api/v1/items/{}/similar", stored.id), None, false)).await.unwrap();
+    assert_eq!(anon.status(), StatusCode::NOT_FOUND, "unauthenticated callers cannot probe private seeds");
+    let authed = app.oneshot(request("GET", &format!("/api/v1/items/{}/similar", stored.id), None, true)).await.unwrap();
+    assert_eq!(authed.status(), StatusCode::OK, "read:private callers keep existing behavior");
+}
+
+#[tokio::test]
+async fn header_rotation_does_not_buy_fresh_buckets() {
+    let (app, _, _d) = fixture().await;
+    let mut limited = false;
+    for i in 0..200 {
+        let req = Request::builder().method("GET").uri("/api/v1/recent")
+            .header("x-forwarded-for", format!("10.0.0.{i}"))
+            .header("x-real-ip", format!("10.0.0.{i}"))
+            .body(Body::empty()).unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(res.headers().contains_key("retry-after"));
+            limited = true; break;
+        }
+    }
+    assert!(limited, "rotating spoof headers must not escape the global bucket");
+}
+
+#[tokio::test]
+async fn scoped_write_key_reaches_follow_route() {
+    let (app, state, _d) = fixture().await;
+    let source = state.store.create_source("https://example.com/f.xml", "rss", None).await.unwrap();
+    let minted = app.clone().oneshot(request("POST", "/api/v1/keys",
+        Some(json!({"name":"writer","scopes":["write:private"]})), true)).await.unwrap();
+    assert_eq!(minted.status(), StatusCode::CREATED);
+    let token = json_body(minted).await["token"].as_str().unwrap().to_string();
+    // Before the fix this answered 401 via authorize(); now require_scope lets a
+    // write:private key past auth (it fails later on the missing AP config, not on auth).
+    let res = app.oneshot(keyed("POST", &format!("/api/v1/sources/{}/follow", source.id), None, &token)).await.unwrap();
+    assert_ne!(res.status(), StatusCode::UNAUTHORIZED, "scoped write:private must pass follow auth");
+    assert_ne!(res.status(), StatusCode::FORBIDDEN, "scoped write:private must pass follow auth");
+}
+
+#[tokio::test]
+async fn per_feed_search_quotes_punctuation() {
+    let (app, state, _d) = fixture().await;
+    let source = state.store.create_source("https://example.com/q.xml", "rss", None).await.unwrap();
+    state.store.create_feed("q", "Q", None, None, None, true).await.unwrap();
+    state.store.attach_source("q", &source.id).await.unwrap();
+    state.store.upsert_item(Some(&source.id), &NewItem {
+        external_id: "q-1".into(), url: Some("https://example.com/q/1".into()),
+        title: Some("Hello world".into()), summary: Some("punctuation test".into()),
+        content: Some("hello world".into()), author: None,
+        published_at: "2026-10-04T10:00:00Z".into(), date_source: "published".into(),
+        tags: vec![], raw: None, visibility: "public".into(),
+    }).await.unwrap();
+    // Raw FTS operators must not break the query; quoting keeps this a 200.
+    let res = app.oneshot(request("GET", "/api/v1/feeds/q/search?q=hello-world%21+OR+%22x%22", None, false)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn embeddings_for_returns_only_requested_ids() {
+    let (_app, state, _d) = fixture().await;
+    let source = state.store.create_source("https://example.com/e.xml", "rss", None).await.unwrap();
+    let a = state.store.upsert_item(Some(&source.id), &test_item("e-a")).await.unwrap();
+    let b = state.store.upsert_item(Some(&source.id), &test_item("e-b")).await.unwrap();
+    let c = state.store.upsert_item(Some(&source.id), &test_item("e-c")).await.unwrap();
+    state.store.put_embedding(&a.id, "remote", &[1.0, 0.0]).await.unwrap();
+    state.store.put_embedding(&b.id, "remote", &[0.0, 1.0]).await.unwrap();
+    state.store.put_embedding(&c.id, "remote", &[0.5, 0.5]).await.unwrap();
+    let rows = state.store.embeddings_for(&[a.id.clone(), b.id.clone()], "remote").await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|(id, _)| id == &a.id));
+    assert!(rows.iter().any(|(id, _)| id == &b.id));
+    assert!(!rows.iter().any(|(id, _)| id == &c.id));
+}
 
 // --- lane-authsec: global governor 429 (Task 8 rate-limit half) ---
 #[tokio::test]

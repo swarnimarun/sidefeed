@@ -91,7 +91,8 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 /// Re-rank lexical hits by cosine to the question when vectors exist. Anything
 /// without a stored vector keeps its lexical position at the tail, and when no
-/// provider is live the order is untouched.
+/// provider is live the order is untouched. Only the hit ids are fetched, in
+/// one query, so a question never scans the whole embeddings table.
 async fn rerank(state: &AppState, q: &str, hits: Vec<Item>) -> Vec<Item> {
     let Ok(provider) = crate::ai::provider(state) else {
         return hits;
@@ -99,7 +100,8 @@ async fn rerank(state: &AppState, q: &str, hits: Vec<Item>) -> Vec<Item> {
     let Ok(needle) = provider.embed(q).await else {
         return hits;
     };
-    let Ok(vectors) = state.store.embeddings(provider.name()).await else {
+    let ids: Vec<String> = hits.iter().map(|item| item.id.clone()).collect();
+    let Ok(vectors) = state.store.embeddings_for(&ids, provider.name()).await else {
         return hits;
     };
     let by_id: HashMap<&str, &Vec<f32>> =

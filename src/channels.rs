@@ -40,7 +40,7 @@ pub fn verify_ingress(channel: &WebhookChannel, headers: &HeaderMap, body: &[u8]
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        if hash_secret(supplied) == channel.secret_hash {
+        if constant_time_eq(&hash_secret(supplied), &channel.secret_hash) {
             return Ok(());
         }
         return Err(Error::Unauthorized);

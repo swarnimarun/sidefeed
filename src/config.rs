@@ -19,10 +19,10 @@ pub struct Config {
     /// to receive Follow Accepts. `0` (default) leaves those routes inert so a
     /// node never speaks ActivityPub unless its operator opts in.
     pub ap_enabled: bool,
-+    // ---- Task 5 (onnx-local): path to an operator-supplied `.onnx`
-+    // embedding model (e.g. quantized MiniLM-L6-v2). Unset by default, so the
-+    // default build never needs model files.
-+    pub onnx_embed_model: Option<PathBuf>,
+    // ---- Task 5 (onnx-local): path to an operator-supplied `.onnx`
+    // embedding model (e.g. quantized MiniLM-L6-v2). Unset by default, so the
+    // default build never needs model files.
+    pub onnx_embed_model: Option<PathBuf>,
     /// Derived-artifact settings: tags and generated summaries.
     pub enrich: EnrichConfig,
     /// Optional directory that overrides the embedded UI assets at runtime.
@@ -103,7 +103,7 @@ impl Config {
             embedding_provider: env::var("SIDEFEED_EMBEDDING_PROVIDER").unwrap_or_else(|_| "disabled".into()),
             // ---- Task 5 (onnx-local): operator-supplied model file, never vendored.
             onnx_embed_model: env::var("SIDEFEED_ONNX_EMBED_MODEL").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
-+            ap_enabled: parse_bool("SIDEFEED_AP_ENABLED", false),
+            ap_enabled: parse_bool("SIDEFEED_AP_ENABLED", false),
             enrich: EnrichConfig::from_env()?,
             web_dir: env::var("SIDEFEED_WEB_DIR").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
             // --- lane-authsec: scoped keys + rate limits (Tasks 1 + 8) ---
@@ -131,10 +131,4 @@ fn parse_bool(name: &str, default: bool) -> bool {
     }
 }
 // --- end lane-authsec Tasks 1+8 ---
-+
-+// ---- lane-ingest: boolean flags (Task 3) ----
-+// Accepts `1`/`true` as on and everything else as off, so an unset or `0`
-+// flag keeps the default behaviour.
-+fn parse_bool(name: &str, default: bool) -> bool {
-+    env::var(name).map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(default)
-+}
+

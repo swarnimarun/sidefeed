@@ -254,9 +254,14 @@ fn host_of(url:Option<&str>)->Option<String>{ url::Url::parse(url?).ok()?.host_s
 /// Related items for one article, blending four signals: the same source, the
 /// same host, shared derived tags, and shared title keywords. Each signal adds
 /// to one score per candidate, so an item that matches several ways ranks
-/// first. Token-free, because it only ever describes public items.
-async fn similar(State(state):State<AppState>,Path(id):Path<String>,Query(q):Query<SimilarQuery>)->Result<Json<Vec<SimilarHit>>>{
+/// first. Token-free for public seeds, because it only ever describes public
+/// items; a private seed needs `read:private`, otherwise it answers 404 so
+/// unauthenticated callers cannot probe private items.
+async fn similar(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>,Query(q):Query<SimilarQuery>)->Result<Json<Vec<SimilarHit>>>{
     let item=state.store.item(&id).await?;
+    if item.visibility != "public" && crate::auth::require_scope(&state,&headers,"read:private").await.is_err() {
+        return Err(Error::NotFound);
+    }
     let limit=q.limit.unwrap_or(8).clamp(1,50);
     let pool=limit.saturating_mul(8).min(200);
     let model=crate::enrich::enricher(&state).map(|enricher|enricher.name().to_string()).ok();
@@ -299,7 +304,7 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Value>> { state.sto
 #[derive(Deserialize)] struct SourceInput { url: String, #[serde(default="auto_kind")] kind: String, title: Option<String>, config: Option<Value> }
 fn auto_kind() -> String { "auto".into() }
 async fn create_source(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<SourceInput>) -> Result<(StatusCode,Json<Source>)> {
-    authorize(&state,&headers)?;
+    crate::auth::require_scope(&state,&headers,"write:private").await?;
     // ---- lane-ingest: kind+config creation (Task 4) ----
     // An `activitypub` source resolves its actor once, now, so polls never
     // depend on WebFinger staying up; other kinds store the config verbatim
@@ -311,7 +316,7 @@ async fn create_source(State(state): State<AppState>, headers: HeaderMap, Json(i
         if !config.is_object() { return Err(Error::Invalid("source config must be a JSON object".into())); }
     }
     if input.kind == "activitypub" {
-        let actor = crate::ap::resolve_actor(&state.http, &input.url).await?;
+        let actor = crate::ap::resolve_actor(&state.http, &input.url, state.config.max_response_bytes).await?;
         let source = state.store.create_source(&actor.id, &input.kind, input.title.as_deref().or(actor.name.as_deref())).await?;
         let mut merged = input.config.unwrap_or(json!({}));
         merged["actor_url"] = Value::String(actor.id);
@@ -325,12 +330,7 @@ async fn create_source(State(state): State<AppState>, headers: HeaderMap, Json(i
         state.store.put_source_config(&source.id, &input.kind, &config.to_string()).await?;
     }
     Ok((StatusCode::CREATED,Json(source)))
--    authorize(&state,&headers)?; let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
-+    crate::auth::require_scope(&state,&headers,"write:private").await?; let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
-     Ok((StatusCode::CREATED,Json(state.store.create_source(url.as_str(),&input.kind,input.title.as_deref()).await?)))
 }
-async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{authorize(&state,&headers)?;Ok(Json(state.store.sources().await?))}
-async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{authorize(&state,&headers)?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
 
 // ---- lane-ingest: signed webhook ingress (Task 2) ----
 // A channel slug addresses a pre-shared secret, not an account, so this route
@@ -382,14 +382,12 @@ async fn ap_inbox(State(state): State<AppState>, headers: HeaderMap, body: Bytes
 
 /// Send a signed Follow to the actor behind one `activitypub` source.
 async fn follow_source(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<Value>> {
-    authorize(&state, &headers)?;
+    crate::auth::require_scope(&state,&headers,"write:private").await?;
     let source = state.store.source(&id).await?;
     Ok(Json(crate::ap::send_follow(&state, &source).await?))
 }
-+-async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{authorize(&state,&headers)?;Ok(Json(state.store.sources().await?))}
-+-async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{authorize(&state,&headers)?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
-++async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{crate::auth::require_scope(&state,&headers,"read:private").await?;Ok(Json(state.store.sources().await?))}
-++async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{crate::auth::require_scope(&state,&headers,"write:private").await?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
+async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{crate::auth::require_scope(&state,&headers,"read:private").await?;Ok(Json(state.store.sources().await?))}
+async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{crate::auth::require_scope(&state,&headers,"write:private").await?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
 async fn import_opml(State(state):State<AppState>,headers:HeaderMap,body:Bytes)->Result<(StatusCode,Json<Value>)>{
     crate::auth::require_scope(&state,&headers,"write:private").await?;let feeds=ingest::parse_opml(&body)?;let mut created=Vec::new();let mut skipped=0;
     for (url,title) in feeds {let parsed=url::Url::parse(&url).map_err(|e|Error::Invalid(format!("invalid OPML URL: {e}")))?;ingest::validate_public_url(&parsed).await?;match state.store.create_source(parsed.as_str(),"auto",title.as_deref()).await{Ok(s)=>created.push(s),Err(Error::Conflict(_))=>skipped+=1,Err(e)=>return Err(e)}}
@@ -438,7 +436,7 @@ async fn feed_items(State(state):State<AppState>,headers:HeaderMap,Path(slug):Pa
     Ok(Json(Page{items:page,next_cursor}))
 }
 #[derive(Deserialize)] struct SearchQuery {q:String,limit:Option<u32>}
-async fn search(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>,Query(q):Query<SearchQuery>)->Result<Json<Vec<Item>>>{access_feed(&state,&headers,&slug).await?;if q.q.trim().is_empty(){return Err(Error::Invalid("q is required".into()));}Ok(Json(state.store.search(&slug,&q.q,q.limit.unwrap_or(30).clamp(1,100)).await?))}
+async fn search(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>,Query(q):Query<SearchQuery>)->Result<Json<Vec<Item>>>{access_feed(&state,&headers,&slug).await?;let query=fts_query(&q.q);if query.is_empty(){return Err(Error::Invalid("q is required".into()));}Ok(Json(state.store.search(&slug,&query,q.limit.unwrap_or(30).clamp(1,100)).await?))}
 
 async fn feed_stream(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>)->Result<Sse<impl futures_util::Stream<Item=std::result::Result<Event,Infallible>>>>{
     access_feed(&state,&headers,&slug).await?;let mut receiver=state.events.subscribe();let store=state.store.clone();
@@ -477,7 +475,8 @@ async fn social_thread(State(state):State<AppState>,headers:HeaderMap,Path(slug)
 }
 
 pub(crate) async fn access_feed(state:&AppState,headers:&HeaderMap,slug:&str)->Result<Feed>{let feed=state.store.feed(slug).await?;if !feed.public{crate::auth::require_scope(state,headers,"read:private").await.map(|_| ())?;}Ok(feed)}
-pub(crate) fn authorize(state:&AppState,headers:&HeaderMap)->Result<()>{let Some(expected)=&state.config.admin_token else{if state.config.api_keys_enabled{return Err(Error::Unauthorized);}return Ok(());};let supplied=headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer "));if supplied==Some(expected.as_str()){Ok(())}else{Err(Error::Unauthorized)}}
+pub(crate) fn authorize(state:&AppState,headers:&HeaderMap)->Result<()>{let Some(expected)=&state.config.admin_token else{if state.config.api_keys_enabled{return Err(Error::Unauthorized);}return Ok(());};let supplied=headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer "));match supplied{Some(token) if constant_time_eq(token,expected)=>Ok(()),_=>Err(Error::Unauthorized)}}
+fn constant_time_eq(left:&str,right:&str)->bool{if left.len()!=right.len(){return false;}left.bytes().zip(right.bytes()).fold(0u8,|acc,(a,b)|acc|(a^b))==0}
 
 // --- lane-authsec: scoped key management routes (Task 1, admin-only) ---
 #[derive(Deserialize)] struct KeyInput { name: String, #[serde(default)] scopes: Vec<String> }

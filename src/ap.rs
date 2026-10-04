@@ -36,6 +36,12 @@ const ACTIVITY_ACCEPT: &str = "application/activity+json, application/ld+json; p
 /// Outbox collection pages followed per poll; each hop is re-checked against
 /// the SSRF denylist and size cap, so a hostile chain cannot page forever.
 const MAX_OUTBOX_PAGES: usize = 3;
+/// At most this many items are kept from one outbox page; excess is dropped
+/// with a warn (mirrors the webhook 100 / raw 500 precedent).
+const MAX_OUTBOX_ITEMS_PER_PAGE: usize = 200;
+/// At most this many items are ingested from one poll_actor pass across all
+/// pages; excess is dropped with a warn.
+const MAX_OUTBOX_ITEMS_TOTAL: usize = 500;
 /// Inbox deliveries older or newer than this are rejected outright.
 const INBOX_SKEW_SECONDS: i64 = 300;
 
@@ -62,6 +68,10 @@ pub fn items_from_outbox(page: &Value, base: &Url) -> Result<Vec<NewItem>> {
         if let Some(item) = normalize_object(object, &activity, base) {
             items.push(item);
         }
+    }
+    if items.len() > MAX_OUTBOX_ITEMS_PER_PAGE {
+        tracing::warn!(kept = MAX_OUTBOX_ITEMS_PER_PAGE, total = items.len(), "outbox page exceeds per-page cap; dropping excess");
+        items.truncate(MAX_OUTBOX_ITEMS_PER_PAGE);
     }
     Ok(items)
 }
@@ -129,10 +139,10 @@ struct ApConfig {
 
 /// Resolve a handle (`user@host`, with or without `acct:`) or a direct actor
 /// URL into an actor document.
-pub async fn resolve_actor(http: &Client, handle_or_url: &str) -> Result<Actor> {
+pub async fn resolve_actor(http: &Client, handle_or_url: &str, max_bytes: usize) -> Result<Actor> {
     let trimmed = handle_or_url.trim().trim_start_matches("acct:").to_owned();
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        return fetch_actor(http, &trimmed).await;
+        return fetch_actor(http, &trimmed, max_bytes).await;
     }
     let (user, host) = trimmed
         .split_once('@')
@@ -157,15 +167,15 @@ pub async fn resolve_actor(http: &Client, handle_or_url: &str) -> Result<Actor> 
         .filter_map(|link| link.get("href").and_then(Value::as_str))
         .next()
         .ok_or_else(|| Error::Invalid("webfinger has no actor link".into()))?;
-    fetch_actor(http, href).await
+    fetch_actor(http, href, max_bytes).await
 }
 
 /// Fetch one actor document. Every fetch is SSRF-checked and size-bounded
 /// like any other ingestion request.
-pub async fn fetch_actor(http: &Client, url: &str) -> Result<Actor> {
+pub async fn fetch_actor(http: &Client, url: &str, max_bytes: usize) -> Result<Actor> {
     let parsed = Url::parse(url).map_err(|e| Error::Invalid(format!("invalid actor URL: {e}")))?;
     validate_public_url(&parsed).await?;
-    let document = get_json(http, &parsed, None).await?.ok_or_else(|| Error::Invalid("actor fetch was not modified".into()))?.0;
+    let document = get_json(http, &parsed, None, max_bytes).await?.ok_or_else(|| Error::Invalid("actor fetch was not modified".into()))?.0;
     actor_from_doc(&document)
 }
 
@@ -181,9 +191,9 @@ fn actor_from_doc(document: &Value) -> Result<Actor> {
     Ok(Actor { id: id.to_owned(), inbox: inbox.to_owned(), outbox: outbox.to_owned(), name })
 }
 
-/// GET one JSON document with the node's response cap. `etag` enables a
+/// GET one JSON document bounded by the caller's response cap. `etag` enables a
 /// conditional request; `Ok(None)` is a 304 Not Modified.
-async fn get_json(http: &Client, url: &Url, etag: Option<&str>) -> Result<Option<(Value, Option<String>)>> {
+async fn get_json(http: &Client, url: &Url, etag: Option<&str>, max_bytes: usize) -> Result<Option<(Value, Option<String>)>> {
     let mut request = http.get(url.clone()).header("Accept", ACTIVITY_ACCEPT);
     if let Some(value) = etag {
         request = request.header(IF_NONE_MATCH, value);
@@ -196,14 +206,11 @@ async fn get_json(http: &Client, url: &Url, etag: Option<&str>) -> Result<Option
         return Err(Error::Invalid(format!("origin returned {}", response.status())));
     }
     let etag_out = response.headers().get(ETAG).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    // The global max_response_bytes lives on AppState, which this helper does
-    // not take; 5 MiB matches the default cap closely enough for AP docs, and
-    // the poller re-checks page bodies against the configured cap below.
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        if bytes.len() + chunk.len() > 5 * 1024 * 1024 {
+        if bytes.len() + chunk.len() > max_bytes {
             return Err(Error::Invalid("actor response is too large".into()));
         }
         bytes.extend_from_slice(&chunk);
@@ -227,7 +234,7 @@ pub async fn poll_actor(state: &AppState, source: &Source) -> Result<usize> {
     let stored = state.store.source_config(&source.id).await?.ok_or_else(|| Error::Invalid("activitypub source has no config".into()))?;
     let config: ApConfig = serde_json::from_str(&stored.config_json).map_err(|e| Error::Invalid(format!("invalid activitypub config: {e}")))?;
     let actor_url = config.actor_url.ok_or_else(|| Error::Invalid("activitypub config needs actor_url".into()))?;
-    let actor = fetch_actor(&state.http, &actor_url).await?;
+    let actor = fetch_actor(&state.http, &actor_url, state.config.max_response_bytes).await?;
     let next_poll = (Utc::now() + chrono::Duration::from_std(state.config.fetch_interval).unwrap_or(chrono::Duration::minutes(15))).to_rfc3339();
 
     let mut next: Option<String> = Some(actor.outbox.clone());
@@ -240,17 +247,26 @@ pub async fn poll_actor(state: &AppState, source: &Source) -> Result<usize> {
         }
         let url = Url::parse(&url_str).map_err(|e| Error::Invalid(format!("invalid outbox URL: {e}")))?;
         validate_public_url(&url).await?;
-        match get_json(&state.http, &url, etag.as_deref()).await? {
+        match get_json(&state.http, &url, etag.as_deref(), state.config.max_response_bytes).await? {
             None => {
                 state.store.update_source_fetch(&source.id, actor.name.as_deref(), None, None, None, &next_poll).await?;
                 return Ok(count);
             }
             Some((page, fresh_etag)) => {
                 etag = fresh_etag.or(etag);
-                for item in items_from_outbox(&page, &url)? {
+                let mut page_items = items_from_outbox(&page, &url)?;
+                if count + page_items.len() > MAX_OUTBOX_ITEMS_TOTAL {
+                    let kept = MAX_OUTBOX_ITEMS_TOTAL.saturating_sub(count);
+                    tracing::warn!(kept = kept, total = count + page_items.len(), "outbox poll exceeds total cap; dropping excess");
+                    page_items.truncate(kept);
+                }
+                for item in page_items {
                     let stored = state.store.upsert_item(Some(&source.id), &item).await?;
                     let _ = state.events.send(stored);
                     count += 1;
+                }
+                if count >= MAX_OUTBOX_ITEMS_TOTAL {
+                    break;
                 }
                 next = next_page_url(&page);
             }
@@ -442,11 +458,16 @@ fn header_value(headers: &HeaderMap, name: &str) -> Result<String> {
 
 /// Verify an inbound delivery against the claimed actor key, including the
 /// digest when the signer covered it and the 5-minute date skew window.
+/// A non-empty body must be covered by `digest`; digest-less signed
+/// deliveries with bodies are rejected outright.
 pub fn verify_request_signature(key: &VerifyingKey, headers: &HeaderMap, method: &str, target: &str, body: &[u8]) -> Result<()> {
     let raw = headers.get("signature").and_then(|v| v.to_str().ok()).ok_or(Error::Unauthorized)?;
     let parsed = parse_signature_header(raw)?;
     if !parsed.headers.iter().any(|name| name == "date") {
         return Err(Error::Invalid("Signature must cover the date header".into()));
+    }
+    if !body.is_empty() && !parsed.headers.iter().any(|name| name == "digest") {
+        return Err(Error::Unauthorized);
     }
     let date = parse_http_date(&header_value(headers, "date")?)?;
     if (Utc::now() - date).num_seconds().abs() > INBOX_SKEW_SECONDS {
@@ -495,7 +516,7 @@ pub async fn send_follow(state: &AppState, source: &Source) -> Result<Value> {
     let stored = state.store.source_config(&source.id).await?.ok_or_else(|| Error::Invalid("activitypub source has no config".into()))?;
     let config: ApConfig = serde_json::from_str(&stored.config_json).map_err(|e| Error::Invalid(format!("invalid activitypub config: {e}")))?;
     let actor_url = config.actor_url.ok_or_else(|| Error::Invalid("activitypub config needs actor_url".into()))?;
-    let actor = fetch_actor(&state.http, &actor_url).await?;
+    let actor = fetch_actor(&state.http, &actor_url, state.config.max_response_bytes).await?;
     let key = node_signing_key(&state.store).await?;
     let follow = json!({
         "@context": "https://www.w3.org/ns/activitystreams",
@@ -519,14 +540,30 @@ pub async fn send_follow(state: &AppState, source: &Source) -> Result<Value> {
 /// Verify and dispatch one inbox delivery. `Accept{Follow}` flips the matching
 /// source config to `following:true`; `Create` normalizes one item from an
 /// actor this node tracks and stores nothing from strangers.
+///
+/// The `Signature` keyId owner must equal `activity.actor`; a delivery that
+/// claims to be from a tracked victim but is signed by another actor's key
+/// is rejected as 401 before any fetch or store.
+/// Whether the `Signature` keyId owner matches `activity.actor`. Both must be
+/// present and byte-equal; anything else is an impersonation attempt.
+pub(crate) fn binding_matches(key_id_owner: &str, activity: &Value) -> bool {
+    match activity.get("actor").and_then(Value::as_str) {
+        Some(actor) if !actor.is_empty() => actor == key_id_owner,
+        _ => false,
+    }
+}
+
 pub async fn handle_inbox(state: &AppState, headers: &HeaderMap, body: &[u8]) -> Result<Value> {
     let activity: Value = serde_json::from_slice(body).map_err(|_| Error::Invalid("inbox body must be JSON".into()))?;
     let raw = headers.get("signature").and_then(|v| v.to_str().ok()).ok_or(Error::Unauthorized)?;
     let parsed = parse_signature_header(raw)?;
     let actor_url = parsed.key_id.split('#').next().unwrap_or("").to_owned();
+    if !binding_matches(&actor_url, &activity) {
+        return Err(Error::Unauthorized);
+    }
     let url = Url::parse(&actor_url).map_err(|_| Error::Invalid("Signature keyId is not a URL".into()))?;
     validate_public_url(&url).await?;
-    let document = get_json(&state.http, &url, None).await?.ok_or_else(|| Error::Invalid("actor fetch was not modified".into()))?.0;
+    let document = get_json(&state.http, &url, None, state.config.max_response_bytes).await?.ok_or_else(|| Error::Invalid("actor fetch was not modified".into()))?.0;
     verify_request_signature(&actor_key(&document)?, headers, "post", "/ap/v1/inbox", body)?;
     match activity.get("type").and_then(Value::as_str).unwrap_or("") {
         "Accept" => handle_accept(state, &activity).await,
@@ -664,5 +701,53 @@ mod tests {
         let items = items_from_outbox(&page, &base).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].external_id, "https://m.example/p/0");
+    }
+
+    #[test]
+    fn digest_is_required_when_the_body_is_non_empty() {
+        let key = test_key();
+        let body = br#"{"type":"Create"}"#;
+        // Headers signed without `digest` must be rejected when a body is present.
+        let date = http_date_now();
+        let text = format!("(request-target): post /ap/v1/inbox\nhost: sidefeed.test\ndate: {date}");
+        let signature = STANDARD.encode(key.sign(text.as_bytes()).to_bytes());
+        let headers: HeaderMap = [
+            ("host", "sidefeed.test"),
+            ("date", date.as_str()),
+            (
+                "signature",
+                &format!(
+                    "keyId=\"https://sidefeed.test/ap/v1/actor#main-key\",headers=\"(request-target) host date\",signature=\"{signature}\""
+                ),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.parse().unwrap(), value.parse().unwrap()))
+        .collect();
+        assert!(verify_request_signature(&key.verifying_key(), &headers, "post", "/ap/v1/inbox", body).is_err());
+        // The same shape with `digest` covered verifies.
+        let headers = signed_headers(&key, body);
+        assert!(verify_request_signature(&key.verifying_key(), &headers, "post", "/ap/v1/inbox", body).is_ok());
+    }
+
+    #[test]
+    fn outbox_pages_truncate_at_two_hundred_items() {
+        let base = Url::parse("https://m.example/users/jo/outbox").unwrap();
+        let ordered: Vec<Value> = (0..250)
+            .map(|i| json!({"type": "Note", "id": format!("https://m.example/p/{i}"), "content": "hello"}))
+            .collect();
+        let page = json!({"orderedItems": ordered});
+        let items = items_from_outbox(&page, &base).unwrap();
+        assert_eq!(items.len(), super::MAX_OUTBOX_ITEMS_PER_PAGE);
+    }
+
+    #[test]
+    fn inbox_binding_requires_keyid_owner_to_equal_actor() {
+        let victim = json!({"type": "Create", "actor": "https://victim.example/users/v"});
+        assert!(super::binding_matches("https://victim.example/users/v", &victim));
+        // Attacker signs with their own key but claims to be the victim.
+        assert!(!super::binding_matches("https://attacker.example/users/a", &victim));
+        // Missing actor never matches.
+        assert!(!super::binding_matches("https://victim.example/users/v", &json!({"type": "Create"})));
     }
 }

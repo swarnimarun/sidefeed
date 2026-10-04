@@ -298,8 +298,10 @@ impl Store {
 
     /// Every saved item, newest save first, with the feed it came from and when
     /// it was saved. One row per item even when several feeds carry it.
+    /// Only public-feed, public-visibility items are listed, so the token-free
+    /// saved list cannot leak private-feed items.
     pub async fn saved_items(&self, limit: u32) -> Result<Vec<SavedItem>> {
-        Ok(sqlx::query_as("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title, b.created_at AS saved_at FROM bookmarks b JOIN items i ON i.id=b.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id GROUP BY i.id ORDER BY b.created_at DESC LIMIT ?")
+        Ok(sqlx::query_as("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title, b.created_at AS saved_at FROM bookmarks b JOIN items i ON i.id=b.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.public=1 AND i.visibility='public' GROUP BY i.id ORDER BY b.created_at DESC LIMIT ?")
             .bind(limit).fetch_all(&self.pool).await?)
     }
 
@@ -365,6 +367,19 @@ impl Store {
     pub async fn embeddings(&self, provider: &str) -> Result<Vec<(String, Vec<f32>)>> {
         let rows: Vec<(String,String)> = sqlx::query_as("SELECT item_id,vector_json FROM embeddings WHERE provider=?").bind(provider).fetch_all(&self.pool).await?;
         rows.into_iter().map(|(id,json)| serde_json::from_str(&json).map(|v| (id,v)).map_err(|e| Error::Internal(e.to_string()))).collect()
+    }
+
+    /// Vectors for exactly these items from one provider, in a single query.
+    /// The ask re-rank passes the 8 lexical hit ids so one question never
+    /// scans the whole embeddings table.
+    pub async fn embeddings_for(&self, ids: &[String], provider: &str) -> Result<Vec<(String, Vec<f32>)>> {
+        if ids.is_empty() { return Ok(Vec::new()); }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!("SELECT item_id,vector_json FROM embeddings WHERE provider=? AND item_id IN ({placeholders})");
+        let mut query = sqlx::query_as::<_, (String, String)>(&sql).bind(provider);
+        for id in ids { query = query.bind(id); }
+        let rows: Vec<(String, String)> = query.fetch_all(&self.pool).await?;
+        rows.into_iter().map(|(id, json)| serde_json::from_str(&json).map(|v| (id, v)).map_err(|e| Error::Internal(e.to_string()))).collect()
     }
 
     // ---- lane-ingest: channel model (Tasks 2-4) ----
@@ -502,27 +517,27 @@ impl Store {
     pub async fn source_configs_by_kind(&self, kind: &str) -> Result<Vec<SourceConfig>> {
         Ok(sqlx::query_as("SELECT * FROM source_configs WHERE kind=?").bind(kind).fetch_all(&self.pool).await?)
     }
-+
-+    // ---- Task 5 (onnx-local auto-embed): missing-vector backlog ----
-+    // Items this embedding provider has not vectorized yet, newest first.
-+    // Mirrors `items_missing_atoms` so vectors backfill like tags do.
-+    pub async fn items_missing_embeddings(&self, provider: &str, limit: u32) -> Result<Vec<Item>> {
-+        Ok(sqlx::query_as("SELECT i.* FROM items i WHERE NOT EXISTS(SELECT 1 FROM embeddings e WHERE e.item_id=i.id AND e.provider=?) ORDER BY i.published_at DESC LIMIT ?")
-+            .bind(provider).bind(limit).fetch_all(&self.pool).await?)
-+    }
-+
-+    /// How many items still lack vectors for this embedding provider.
-+    pub async fn count_missing_embeddings(&self, provider: &str) -> Result<u64> {
-+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM items i WHERE NOT EXISTS(SELECT 1 FROM embeddings e WHERE e.item_id=i.id AND e.provider=?)")
-+            .bind(provider).fetch_one(&self.pool).await?)
-+    }
-+
-+    /// How many items still lack artifacts from this enricher.
-+    pub async fn count_missing_atoms(&self, model: &str) -> Result<u64> {
-+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM items i WHERE NOT EXISTS(SELECT 1 FROM item_enrichments e WHERE e.item_id=i.id AND e.kind='summary' AND e.model=?)")
-+            .bind(model).fetch_one(&self.pool).await?)
-+    }
-+    // ---- end Task 5 ----
+
+    // ---- Task 5 (onnx-local auto-embed): missing-vector backlog ----
+    // Items this embedding provider has not vectorized yet, newest first.
+    // Mirrors `items_missing_atoms` so vectors backfill like tags do.
+    pub async fn items_missing_embeddings(&self, provider: &str, limit: u32) -> Result<Vec<Item>> {
+        Ok(sqlx::query_as("SELECT i.* FROM items i WHERE NOT EXISTS(SELECT 1 FROM embeddings e WHERE e.item_id=i.id AND e.provider=?) ORDER BY i.published_at DESC LIMIT ?")
+            .bind(provider).bind(limit).fetch_all(&self.pool).await?)
+    }
+
+    /// How many items still lack vectors for this embedding provider.
+    pub async fn count_missing_embeddings(&self, provider: &str) -> Result<u64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM items i WHERE NOT EXISTS(SELECT 1 FROM embeddings e WHERE e.item_id=i.id AND e.provider=?)")
+            .bind(provider).fetch_one(&self.pool).await?)
+    }
+
+    /// How many items still lack artifacts from this enricher.
+    pub async fn count_missing_atoms(&self, model: &str) -> Result<u64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM items i WHERE NOT EXISTS(SELECT 1 FROM item_enrichments e WHERE e.item_id=i.id AND e.kind='summary' AND e.model=?)")
+            .bind(model).fetch_one(&self.pool).await?)
+    }
+    // ---- end Task 5 ----
 }
 
 /// Restricts a query that aliases `items` as `i` to a set of derived tags. `all`
