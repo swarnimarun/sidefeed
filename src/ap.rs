@@ -602,10 +602,12 @@ async fn handle_create(state: &AppState, activity: &Value) -> Result<Value> {
     let Some(item) = normalize_object(object, activity, &base) else {
         return Ok(json!({"accepted": true, "stored": 0}));
     };
-    // Only actors this node tracks may write into the store through the inbox.
+    // Only actors this node tracks may write into the store through the inbox,
+    // authorized on the verified sender alone. `attributedTo` is author
+    // metadata, not authority: trusting it would let any signer store items
+    // under a tracked victim by naming them as the attributed author.
     let sender = activity.get("actor").and_then(Value::as_str).unwrap_or("");
-    let attributed = object.get("attributedTo").and_then(Value::as_str).unwrap_or("");
-    let source_id = source_for_actor(&state.store, &[sender, attributed]).await?;
+    let source_id = source_for_actor(&state.store, &[sender]).await?;
     let Some(source_id) = source_id else {
         return Ok(json!({"accepted": true, "stored": 0}));
     };
@@ -739,6 +741,20 @@ mod tests {
         let page = json!({"orderedItems": ordered});
         let items = items_from_outbox(&page, &base).unwrap();
         assert_eq!(items.len(), super::MAX_OUTBOX_ITEMS_PER_PAGE);
+    }
+
+    #[tokio::test]
+    async fn inbox_create_authorizes_sender_not_attributed_author() {
+        // A source tracks the victim. An attacker-signed Create naming the
+        // victim only as attributedTo must resolve to no source, so nothing
+        // is stored under the victim.
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+        let store = Store::connect(&url).await.unwrap();
+        let source = store.create_source("https://victim.example/users/v", "activitypub", None).await.unwrap();
+        store.put_source_config(&source.id, "activitypub", r#"{"actor_url":"https://victim.example/users/v"}"#).await.unwrap();
+        assert!(super::source_for_actor(&store, &["https://victim.example/users/v"]).await.unwrap().is_some());
+        assert!(super::source_for_actor(&store, &["https://attacker.example/users/a"]).await.unwrap().is_none());
     }
 
     #[test]
