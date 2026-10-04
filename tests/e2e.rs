@@ -51,6 +51,34 @@ fn request(method: &str, uri: &str, body: Option<Value>, authenticated: bool) ->
     builder.body(body.map(|value| Body::from(value.to_string())).unwrap_or_else(Body::empty)).unwrap()
 }
 
+// ---- Task 2: webhook channels (lane-ingest) ----
+// Builds a signed webhook ingress request. The channel secret travels as a
+// Bearer token, one of the two verification modes `channels::verify_ingress`
+// accepts (the other is the `x-sidefeed-signature` HMAC header).
+fn signed_ingress(method: &str, uri: &str, body: Value, secret: &str) -> Request<Body> {
+    Request::builder().method(method).uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+        .body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn webhook_channel_ingests_a_signed_batch() {
+    let (app, state, _d) = fixture().await;
+    let source = state.store.create_source("webhook:deploy-events", "webhook", Some("Deploys")).await.unwrap();
+    let created = app.clone().oneshot(request("POST", "/api/v1/feeds",
+        Some(json!({"slug":"ops","title":"Ops","public":true})), true)).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let _ = state.store.attach_source("ops", &source.id).await.unwrap();
+    let channel = state.store.create_channel("deploys", &sidefeed::channels::hash_secret("s3cret"), Some(&source.id)).await.unwrap();
+    assert_eq!(channel.slug, "deploys");
+    let body = json!({"items":[{"id":"d1","title":"deploy v42","url":"https://ex.example/d/42"}]});
+    let res = app.oneshot(signed_ingress("POST", "/api/v1/ingress/deploys", body, "s3cret")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    let items = state.store.feed_items("ops", 10, None).await.unwrap();
+    assert_eq!(items.len(), 1);
+}
+
 async fn json_body(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()

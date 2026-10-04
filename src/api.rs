@@ -33,6 +33,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/items/{id}/similar", get(similar))
         .route("/api/v1/sources", get(list_sources).post(create_source))
         .route("/api/v1/sources/{id}/poll", post(poll_source))
+        // ---- lane-ingest: signed webhook ingress (Task 2) ----
+        .route("/api/v1/ingress/{slug}", post(ingress))
         .route("/api/v1/import/opml", post(import_opml))
         .route("/api/v1/feeds", get(list_feeds).post(create_feed))
         .route("/api/v1/feeds/{slug}/sources/{source_id}", post(attach_source))
@@ -293,8 +295,39 @@ async fn create_source(State(state): State<AppState>, headers: HeaderMap, Json(i
     crate::auth::require_scope(&state,&headers,"write:private").await?; let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
     Ok((StatusCode::CREATED,Json(state.store.create_source(url.as_str(),&input.kind,input.title.as_deref()).await?)))
 }
-async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{crate::auth::require_scope(&state,&headers,"read:private").await?;Ok(Json(state.store.sources().await?))}
-async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{crate::auth::require_scope(&state,&headers,"write:private").await?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
+async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{authorize(&state,&headers)?;Ok(Json(state.store.sources().await?))}
+async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{authorize(&state,&headers)?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
+
+// ---- lane-ingest: signed webhook ingress (Task 2) ----
+// A channel slug addresses a pre-shared secret, not an account, so this route
+// is token-free by design: possession of the secret *is* the credential, the
+// same shape as a GitHub/Stripe webhook receiver. The global 2 MiB body limit
+// layer applies, and batches over 100 items answer 413 without ingesting.
+async fn ingress(State(state): State<AppState>, Path(slug): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
+    let channel = match state.store.channel(&slug).await {
+        Ok(channel) => channel,
+        Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
+    };
+    if crate::channels::verify_ingress(&channel, &headers, &body).is_err() {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response();
+    }
+    let items = match crate::channels::normalize_webhook(&body) {
+        Ok(items) => items,
+        Err(status) => return (status, Json(json!({"error": "invalid webhook payload"}))).into_response(),
+    };
+    let mut accepted = 0;
+    for item in &items {
+        match state.store.upsert_item(channel.source_id.as_deref(), item).await {
+            Ok(stored) => { let _ = state.events.send(stored); accepted += 1; }
+            Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error.to_string()}))).into_response(),
+        }
+    }
+    (StatusCode::ACCEPTED, Json(json!({"accepted": accepted}))).into_response()
+}
+-async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{authorize(&state,&headers)?;Ok(Json(state.store.sources().await?))}
+-async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{authorize(&state,&headers)?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
++async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{crate::auth::require_scope(&state,&headers,"read:private").await?;Ok(Json(state.store.sources().await?))}
++async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{crate::auth::require_scope(&state,&headers,"write:private").await?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}
 async fn import_opml(State(state):State<AppState>,headers:HeaderMap,body:Bytes)->Result<(StatusCode,Json<Value>)>{
     crate::auth::require_scope(&state,&headers,"write:private").await?;let feeds=ingest::parse_opml(&body)?;let mut created=Vec::new();let mut skipped=0;
     for (url,title) in feeds {let parsed=url::Url::parse(&url).map_err(|e|Error::Invalid(format!("invalid OPML URL: {e}")))?;ingest::validate_public_url(&parsed).await?;match state.store.create_source(parsed.as_str(),"auto",title.as_deref()).await{Ok(s)=>created.push(s),Err(Error::Conflict(_))=>skipped+=1,Err(e)=>return Err(e)}}

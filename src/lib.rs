@@ -4,6 +4,7 @@ pub mod api;
 pub mod auth;
 pub mod ratelimit;
 // --- end lane-authsec Tasks 1+8 ---
+pub mod channels;
 pub mod config;
 pub mod enrich;
 pub mod error;

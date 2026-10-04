@@ -131,3 +131,26 @@ impl ApiKey {
 }
 // --- end lane-authsec Task 1 ---
 
+// ---- lane-ingest: channel model (Tasks 2-4) ----
+// Per-source poller configuration for the non-feed kinds (`webhook`,
+// `raw-json`, `activitypub`). The JSON shape is interpreted by the matching
+// poller in `channels` or `ap`; the store keeps it opaque.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SourceConfig {
+    pub source_id: String,
+    pub kind: String,
+    pub config_json: String,
+}
+
+// A named webhook ingress endpoint bound to one source. The secret hash is
+// never serialized: responses expose the slug, never the credential.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WebhookChannel {
+    pub id: String,
+    pub slug: String,
+    #[serde(skip_serializing)]
+    pub secret_hash: String,
+    pub source_id: Option<String>,
+    pub created_at: String,
+}
+

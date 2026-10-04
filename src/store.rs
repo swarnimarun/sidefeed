@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
 use std::{collections::HashMap, str::FromStr};
 use uuid::Uuid;
-use crate::{error::{Error, Result}, model::{Atoms, Feed, Item, ItemWithFeed, NewItem, Peer, SavedItem, Source}};
+use crate::{error::{Error, Result}, model::{Atoms, Feed, Item, ItemWithFeed, NewItem, Peer, SavedItem, Source, SourceConfig, WebhookChannel}};
 
 #[derive(Clone)]
 pub struct Store { pool: SqlitePool }
@@ -367,79 +367,119 @@ impl Store {
         rows.into_iter().map(|(id,json)| serde_json::from_str(&json).map(|v| (id,v)).map_err(|e| Error::Internal(e.to_string()))).collect()
     }
 
-    // --- lane-authsec: scoped API keys (Task 1) ---
-    /// Store a new key; only the hash is persisted. `prefix` is the first 8
-    /// characters of the plaintext, shown in listings so an operator can tell
-    /// keys apart without ever seeing the secret again.
-    pub async fn create_key(
-        &self,
-        name: &str,
-        prefix: &str,
-        token_hash: &str,
-        scopes: &[String],
-    ) -> Result<crate::model::ApiKey> {
+    // ---- lane-ingest: channel model (Tasks 2-4) ----
+    // Poller configuration and webhook ingress channels. `config_json` stays
+    // opaque here; the matching poller in `channels` or `ap` interprets it.
+
+    /// Insert or replace the poller configuration for one source.
+    pub async fn put_source_config(&self, source_id: &str, kind: &str, config_json: &str) -> Result<SourceConfig> {
+        self.source(source_id).await?;
+        // Reject anything that is not an object early, so a typo surfaces at
+        // creation time instead of silently disabling a poller later.
+        let parsed: serde_json::Value = serde_json::from_str(config_json).map_err(|e| Error::Invalid(format!("invalid source config: {e}")))?;
+        if !parsed.is_object() { return Err(Error::Invalid("source config must be a JSON object".into())); }
+        sqlx::query("INSERT INTO source_configs(source_id,kind,config_json) VALUES(?,?,?) ON CONFLICT(source_id) DO UPDATE SET kind=excluded.kind,config_json=excluded.config_json")
+            .bind(source_id).bind(kind).bind(config_json).execute(&self.pool).await?;
+        self.source_config(source_id).await?.ok_or(Error::NotFound)
+    }
+
+    /// The poller configuration for one source, if any was stored.
+    pub async fn source_config(&self, source_id: &str) -> Result<Option<SourceConfig>> {
+        Ok(sqlx::query_as("SELECT * FROM source_configs WHERE source_id=?").bind(source_id).fetch_optional(&self.pool).await?)
+    }
+
+    /// Create a named webhook ingress endpoint bound to one source. The slug
+    // follows the same rule as feed slugs so it is safe to embed in a URL path.
+    pub async fn create_channel(&self, slug: &str, secret_hash: &str, source_id: Option<&str>) -> Result<WebhookChannel> {
+        if slug.is_empty() || slug.len() > 64 || !slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            return Err(Error::Invalid("channel slug must contain lowercase letters, digits, or hyphens".into()));
+        }
+        if let Some(id) = source_id { self.source(id).await?; }
         let id = Uuid::new_v4().to_string();
-        let scopes_json =
-            serde_json::to_string(scopes).map_err(|e| Error::Invalid(e.to_string()))?;
-        sqlx::query(
-            "INSERT INTO api_keys(id,name,prefix,token_hash,scopes_json,revoked,created_at) VALUES(?,?,?,?,?,0,?)",
-        )
-        .bind(&id)
-        .bind(name)
-        .bind(prefix)
-        .bind(token_hash)
-        .bind(&scopes_json)
-        .bind(Utc::now().to_rfc3339())
-        .execute(&self.pool)
-        .await
-        .map_err(map_unique)?;
-        self.key_by_id(&id).await
+        sqlx::query("INSERT INTO webhook_channels(id,slug,secret_hash,source_id,created_at) VALUES(?,?,?,?,?)")
+            .bind(&id).bind(slug).bind(secret_hash).bind(source_id).bind(Utc::now().to_rfc3339())
+            .execute(&self.pool).await.map_err(map_unique)?;
+        self.channel(slug).await
     }
 
-    async fn key_by_id(&self, id: &str) -> Result<crate::model::ApiKey> {
-        sqlx::query_as("SELECT * FROM api_keys WHERE id=?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::NotFound)
+    /// Look up a webhook channel by its URL slug.
+    pub async fn channel(&self, slug: &str) -> Result<WebhookChannel> {
+        sqlx::query_as("SELECT * FROM webhook_channels WHERE slug=?").bind(slug).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)
     }
-
-    /// Look up a live key by its token hash. Unknown hashes and revoked keys
-    /// both surface as `Unauthorized` so callers cannot probe for key ids.
-    pub async fn key_by_hash(&self, token_hash: &str) -> Result<crate::model::ApiKey> {
-        let key: Option<crate::model::ApiKey> =
-            sqlx::query_as("SELECT * FROM api_keys WHERE token_hash=?")
-                .bind(token_hash)
-                .fetch_optional(&self.pool)
-                .await?;
-        match key {
-            Some(found) if !found.revoked => Ok(found),
-            _ => Err(Error::Unauthorized),
-        }
-    }
-
-    /// Revoke a key; later uses fail closed as `Unauthorized`.
-    pub async fn revoke_key(&self, id: &str) -> Result<()> {
-        let result = sqlx::query("UPDATE api_keys SET revoked=1 WHERE id=?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            return Err(Error::NotFound);
-        }
-        Ok(())
-    }
-
-    /// Record a successful use, so operators can spot stale keys.
-    pub async fn touch_key(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE api_keys SET last_used_at=? WHERE id=?")
-            .bind(Utc::now().to_rfc3339())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-    // --- end lane-authsec Task 1 ---
++
++    // --- lane-authsec: scoped API keys (Task 1) ---
++    /// Store a new key; only the hash is persisted. `prefix` is the first 8
++    /// characters of the plaintext, shown in listings so an operator can tell
++    /// keys apart without ever seeing the secret again.
++    pub async fn create_key(
++        &self,
++        name: &str,
++        prefix: &str,
++        token_hash: &str,
++        scopes: &[String],
++    ) -> Result<crate::model::ApiKey> {
++        let id = Uuid::new_v4().to_string();
++        let scopes_json =
++            serde_json::to_string(scopes).map_err(|e| Error::Invalid(e.to_string()))?;
++        sqlx::query(
++            "INSERT INTO api_keys(id,name,prefix,token_hash,scopes_json,revoked,created_at) VALUES(?,?,?,?,?,0,?)",
++        )
++        .bind(&id)
++        .bind(name)
++        .bind(prefix)
++        .bind(token_hash)
++        .bind(&scopes_json)
++        .bind(Utc::now().to_rfc3339())
++        .execute(&self.pool)
++        .await
++        .map_err(map_unique)?;
++        self.key_by_id(&id).await
++    }
++
++    async fn key_by_id(&self, id: &str) -> Result<crate::model::ApiKey> {
++        sqlx::query_as("SELECT * FROM api_keys WHERE id=?")
++            .bind(id)
++            .fetch_optional(&self.pool)
++            .await?
++            .ok_or(Error::NotFound)
++    }
++
++    /// Look up a live key by its token hash. Unknown hashes and revoked keys
++    /// both surface as `Unauthorized` so callers cannot probe for key ids.
++    pub async fn key_by_hash(&self, token_hash: &str) -> Result<crate::model::ApiKey> {
++        let key: Option<crate::model::ApiKey> =
++            sqlx::query_as("SELECT * FROM api_keys WHERE token_hash=?")
++                .bind(token_hash)
++                .fetch_optional(&self.pool)
++                .await?;
++        match key {
++            Some(found) if !found.revoked => Ok(found),
++            _ => Err(Error::Unauthorized),
++        }
++    }
++
++    /// Revoke a key; later uses fail closed as `Unauthorized`.
++    pub async fn revoke_key(&self, id: &str) -> Result<()> {
++        let result = sqlx::query("UPDATE api_keys SET revoked=1 WHERE id=?")
++            .bind(id)
++            .execute(&self.pool)
++            .await?;
++        if result.rows_affected() == 0 {
++            return Err(Error::NotFound);
++        }
++        Ok(())
++    }
++
++    /// Record a successful use, so operators can spot stale keys.
++    pub async fn touch_key(&self, id: &str) -> Result<()> {
++        sqlx::query("UPDATE api_keys SET last_used_at=? WHERE id=?")
++            .bind(Utc::now().to_rfc3339())
++            .bind(id)
++            .execute(&self.pool)
++            .await?;
++        Ok(())
++    }
++    // --- end lane-authsec Task 1 ---
 }
 
 /// Restricts a query that aliases `items` as `i` to a set of derived tags. `all`
