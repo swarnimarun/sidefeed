@@ -45,19 +45,84 @@ pub async fn poll_source(state: &AppState, source: &Source) -> Result<usize> {
 
 async fn poll_source_inner(state: &AppState, source: &Source) -> Result<usize> {
     // ---- lane-ingest: kind dispatch (Tasks 3-4) ----
-    // ActivityPub sources poll outboxes through `ap`; webhook sources are
+    // ActivityPub sources poll outboxes through `ap`; `raw-json` sources go
+    // through the generic REST poller in `channels`. Webhook sources are
     // push-only (ingress stores their items), so a poll is a no-op rather
-    // than a fetch error. `raw-json` dispatch lands in Task 4.
+    // than a fetch error.
     if source.kind == "activitypub" { return crate::ap::poll_actor(state, source).await; }
+    if source.kind == "raw-json" {
+        let stored = state.store.source_config(&source.id).await?.unwrap_or(crate::model::SourceConfig {
+            source_id: source.id.clone(), kind: "raw-json".into(), config_json: "{}".into(),
+        });
+        let config: crate::channels::RawJsonConfig = serde_json::from_str(&stored.config_json)
+            .map_err(|e| Error::Invalid(format!("invalid raw-json config: {e}")))?;
+        return crate::channels::poll_raw_json(state, source, &config).await;
+    }
     if source.kind == "webhook" { return Ok(0); }
-    let mut url = Url::parse(&source.url).map_err(|e| Error::Invalid(format!("invalid source URL: {e}")))?;
+    let url = Url::parse(&source.url).map_err(|e| Error::Invalid(format!("invalid source URL: {e}")))?;
+    let mut fetched = fetch_validated(state, url, source.etag.as_deref(), source.last_modified.as_deref()).await?;
+    let next = (Utc::now() + chrono::Duration::from_std(state.config.fetch_interval).unwrap_or(chrono::Duration::minutes(15))).to_rfc3339();
+    if fetched.not_modified {
+        state.store.update_source_fetch(&source.id, None, None, None, None, &next).await?;
+        return Ok(0);
+    }
+    // A source URL that returns a web page is probably the site homepage, not
+    // the feed: follow one `<link rel="alternate">` discovery hop (Task 4).
+    if is_html(&fetched.content_type, &fetched.bytes) {
+        let text = String::from_utf8_lossy(&fetched.bytes);
+        if let Some(discovered) = discover_feed_url(&text, &fetched.url) {
+            let target = Url::parse(&discovered).map_err(|e| Error::Invalid(format!("invalid discovered feed URL: {e}")))?;
+            fetched = fetch_validated(state, target, None, None).await?;
+            if fetched.not_modified {
+                state.store.update_source_fetch(&source.id, None, None, None, None, &next).await?;
+                return Ok(0);
+            }
+        }
+    }
+    let (title, mut items) = parse_document(&fetched.bytes, &fetched.content_type, &fetched.url)?;
+    // JSON Feed archives page through `next_url`: follow up to two further
+    // pages (three total), each re-checked and re-capped like the first.
+    let mut paging = next_url_of(&fetched.bytes);
+    for _ in 0..2 {
+        let Some(page_url) = paging.take() else { break; };
+        let target = Url::parse(&page_url).map_err(|e| Error::Invalid(format!("invalid next_url: {e}")))?;
+        let page = fetch_validated(state, target, None, None).await?;
+        if page.not_modified { break; }
+        let (_, mut more) = parse_document(&page.bytes, &page.content_type, &page.url)?;
+        paging = next_url_of(&page.bytes);
+        items.append(&mut more);
+    }
+    let mut count = 0;
+    for candidate in items {
+        let item = state.store.upsert_item(Some(&source.id), &candidate).await?;
+        let _ = state.events.send(item);
+        count += 1;
+    }
+    state.store.update_source_fetch(&source.id, title.as_deref(), fetched.etag.as_deref(), fetched.modified.as_deref(), None, &next).await?;
+    Ok(count)
+}
+
+/// One SSRF-checked, size-bounded GET with redirect following. Conditional
+/// validators apply to the first hop only; every hop (including the first)
+/// is checked against the private-network denylist before it is sent.
+/// `Ok` with `not_modified` is a 304 answer to the validators.
+pub(crate) struct Fetched {
+    pub url: Url,
+    pub not_modified: bool,
+    pub etag: Option<String>,
+    pub modified: Option<String>,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+pub(crate) async fn fetch_validated(state: &AppState, mut url: Url, etag: Option<&str>, modified: Option<&str>) -> Result<Fetched> {
     let mut response = None;
     for hop in 0..=5 {
         validate_public_url(&url).await?;
         let mut request = state.http.get(url.clone()).header("Accept", "application/atom+xml, application/rss+xml, application/feed+json, application/activity+json, application/json;q=0.8, */*;q=0.1");
         if hop == 0 {
-            if let Some(etag) = &source.etag { request = request.header(IF_NONE_MATCH, etag); }
-            if let Some(value) = &source.last_modified { request = request.header(IF_MODIFIED_SINCE, value); }
+            if let Some(value) = etag { request = request.header(IF_NONE_MATCH, value); }
+            if let Some(value) = modified { request = request.header(IF_MODIFIED_SINCE, value); }
         }
         let current = request.send().await?;
         // 304 sits inside the 3xx range. A conditional GET answering "unchanged"
@@ -71,10 +136,8 @@ async fn poll_source_inner(state: &AppState, source: &Source) -> Result<usize> {
         response = Some(current); break;
     }
     let response = response.ok_or_else(|| Error::Invalid("too many redirects".into()))?;
-    let next = (Utc::now() + chrono::Duration::from_std(state.config.fetch_interval).unwrap_or(chrono::Duration::minutes(15))).to_rfc3339();
     if response.status() == StatusCode::NOT_MODIFIED {
-        state.store.update_source_fetch(&source.id, None, None, None, None, &next).await?;
-        return Ok(0);
+        return Ok(Fetched { url, not_modified: true, etag: None, modified: None, content_type: String::new(), bytes: Vec::new() });
     }
     if !response.status().is_success() { return Err(Error::Invalid(format!("origin returned {}", response.status()))); }
     if response.content_length().is_some_and(|n| n > state.config.max_response_bytes as u64) { return Err(Error::Invalid("source response is too large".into())); }
@@ -88,15 +151,49 @@ async fn poll_source_inner(state: &AppState, source: &Source) -> Result<usize> {
         if bytes.len() + chunk.len() > state.config.max_response_bytes { return Err(Error::Invalid("source response is too large".into())); }
         bytes.extend_from_slice(&chunk);
     }
-    let (title, items) = parse_document(&bytes, &content_type, &url)?;
-    let mut count = 0;
-    for candidate in items {
-        let item = state.store.upsert_item(Some(&source.id), &candidate).await?;
-        let _ = state.events.send(item);
-        count += 1;
+    Ok(Fetched { url, not_modified: false, etag, modified, content_type, bytes })
+}
+
+fn is_html(content_type: &str, bytes: &[u8]) -> bool {
+    if content_type.contains("html") { return true; }
+    if content_type.contains("json") || content_type.contains("xml") { return false; }
+    matches!(bytes.iter().copied().find(|byte| !byte.is_ascii_whitespace()), Some(b'<'))
+}
+
+/// The `next_url` of a JSON Feed document, if it carries one.
+fn next_url_of(bytes: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(bytes).ok()?.get("next_url").and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Feed URL discovery (Task 4): the `href` of a `<link rel="alternate">`
+/// tag whose type is a known feed type, resolved against the page URL.
+/// Scans the raw markup so malformed pages still resolve; only the head's
+/// alternates qualify, never stylesheets or icons.
+pub fn discover_feed_url(html: &str, base: &Url) -> Option<String> {
+    const TYPES: [&str; 3] = ["application/feed+json", "application/atom+xml", "application/rss+xml"];
+    let lower = html.to_lowercase();
+    let mut rest = 0;
+    while let Some(start) = lower[rest..].find("<link") {
+        let start = rest + start;
+        // `<link` must end at a separator so `<linkfoo` never matches.
+        if !lower[start + 5..].starts_with([' ', '\t', '\n', '\r', '/', '>']) {
+            rest = start + 5;
+            continue;
+        }
+        let end = lower[start..].find('>').map(|i| start + i)?;
+        let tag = &html[start..end.min(html.len())];
+        let rel = attribute(tag, "rel").unwrap_or_default().to_lowercase();
+        let kind = attribute(tag, "type").unwrap_or_default().to_lowercase();
+        if rel.split_whitespace().any(|token| token == "alternate") && TYPES.contains(&kind.as_str()) {
+            if let Some(href) = attribute(tag, "href") {
+                if let Ok(resolved) = base.join(&href) {
+                    return Some(resolved.to_string());
+                }
+            }
+        }
+        rest = end + 1;
     }
-    state.store.update_source_fetch(&source.id, title.as_deref(), etag.as_deref(), modified.as_deref(), None, &next).await?;
-    Ok(count)
+    None
 }
 
 fn header(response: &reqwest::Response, name: reqwest::header::HeaderName) -> Option<String> {
@@ -206,7 +303,9 @@ fn prefer_article(url: Option<String>, body: Option<&str>) -> Option<String> {
 struct JsonFeed { title: Option<String>, #[serde(default)] items: Vec<JsonFeedItem> }
 #[derive(Deserialize)]
 struct JsonFeedItem {
-    id: String, url: Option<String>, title: Option<String>, summary: Option<String>, content_html: Option<String>, content_text: Option<String>,
+    // Real-world JSON Feeds omit `id` on briefs; fall back to the URL and
+    // only then to a generated id so a sloppy entry still ingests stably.
+    #[serde(default)] id: Option<String>, url: Option<String>, title: Option<String>, summary: Option<String>, content_html: Option<String>, content_text: Option<String>,
     date_published: Option<String>, date_modified: Option<String>, #[serde(default)] tags: Vec<String>, #[serde(default)] authors: Vec<JsonAuthor>, author: Option<JsonAuthor>,
 }
 #[derive(Deserialize)] struct JsonAuthor { name: Option<String> }
@@ -217,8 +316,9 @@ fn parse_json(bytes: &[u8], base: &Url) -> Result<(Option<String>, Vec<NewItem>)
         let feed: JsonFeed = serde_json::from_value(value).map_err(|e| Error::Invalid(e.to_string()))?;
         let items = feed.items.into_iter().map(|i| {
             let (published_at, date_source) = dated(i.date_published, i.date_modified);
+            let external_id = i.id.or_else(|| i.url.clone()).unwrap_or_else(|| Uuid::new_v4().to_string());
             NewItem {
-                external_id: i.id, url: i.url, title: i.title, summary: i.summary, content: i.content_html.or(i.content_text),
+                external_id, url: i.url, title: i.title, summary: i.summary, content: i.content_html.or(i.content_text),
                 author: i.authors.first().or(i.author.as_ref()).and_then(|a| a.name.clone()),
                 published_at, date_source, tags: i.tags,
                 raw: None, visibility: "public".into(),
@@ -320,6 +420,28 @@ mod tests {
         let base = Url::parse("https://example.com/feed").unwrap();
         let (_, items) = parse_document(br#"{"version":"https://jsonfeed.org/version/1.1","title":"x","items":[{"id":"1","content_text":"hello"}]}"#, "application/feed+json", &base).unwrap();
         assert_eq!(items[0].external_id, "1");
+    }
+    #[test]
+    fn json_feed_entries_without_ids_fall_back_to_their_url() {
+        let base = Url::parse("https://example.com/feed").unwrap();
+        let (_, items) = parse_document(br#"{"version":"https://jsonfeed.org/version/1.1","items":[{"url":"https://example.com/p/1","content_text":"hi"}]}"#, "application/feed+json", &base).unwrap();
+        assert_eq!(items[0].external_id, "https://example.com/p/1");
+    }
+    #[test]
+    fn discovery_finds_feed_alternates_and_ignores_the_rest() {
+        let base = Url::parse("https://example.com/blog/").unwrap();
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="/app.css">
+            <link rel="alternate" type="application/rss+xml" href="/feed.xml">
+            <link rel="alternate" type="application/feed+json" href="https://cdn.example/feed.json">
+        </head></html>"#;
+        // The first alternate wins; relative hrefs resolve against the page.
+        assert_eq!(discover_feed_url(html, &base).as_deref(), Some("https://example.com/feed.xml"));
+        let json_only = r#"<head><link rel='alternate' type='application/feed+json' href='/f.json'></head>"#;
+        assert_eq!(discover_feed_url(json_only, &base).as_deref(), Some("https://example.com/f.json"));
+        let none = r#"<head><link rel="alternate" type="text/html" href="/other"></head>"#;
+        assert_eq!(discover_feed_url(none, &base), None);
+        assert_eq!(discover_feed_url("<p>no links here</p>", &base), None);
     }
     #[test]
     fn parses_opml_urls() {

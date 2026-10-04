@@ -296,11 +296,38 @@ fn add_candidate(scored:&mut HashMap<String,(f32,ItemWithFeed)>,row:ItemWithFeed
 async fn health() -> Json<Value> { Json(json!({"status":"ok","version":env!("CARGO_PKG_VERSION")})) }
 async fn ready(State(state): State<AppState>) -> Result<Json<Value>> { state.store.ping().await?; Ok(Json(json!({"status":"ready"}))) }
 
-#[derive(Deserialize)] struct SourceInput { url: String, #[serde(default="auto_kind")] kind: String, title: Option<String> }
+#[derive(Deserialize)] struct SourceInput { url: String, #[serde(default="auto_kind")] kind: String, title: Option<String>, config: Option<Value> }
 fn auto_kind() -> String { "auto".into() }
 async fn create_source(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<SourceInput>) -> Result<(StatusCode,Json<Source>)> {
-    crate::auth::require_scope(&state,&headers,"write:private").await?; let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
-    Ok((StatusCode::CREATED,Json(state.store.create_source(url.as_str(),&input.kind,input.title.as_deref()).await?)))
+    authorize(&state,&headers)?;
+    // ---- lane-ingest: kind+config creation (Task 4) ----
+    // An `activitypub` source resolves its actor once, now, so polls never
+    // depend on WebFinger staying up; other kinds store the config verbatim
+    // for their poller. Handles (`user@host`) skip URL validation and
+    // resolve through WebFinger instead.
+    // A config that is not an object can never be stored, so reject it
+    // before any source row exists.
+    if let Some(config) = &input.config {
+        if !config.is_object() { return Err(Error::Invalid("source config must be a JSON object".into())); }
+    }
+    if input.kind == "activitypub" {
+        let actor = crate::ap::resolve_actor(&state.http, &input.url).await?;
+        let source = state.store.create_source(&actor.id, &input.kind, input.title.as_deref().or(actor.name.as_deref())).await?;
+        let mut merged = input.config.unwrap_or(json!({}));
+        merged["actor_url"] = Value::String(actor.id);
+        merged["following"] = Value::Bool(false);
+        state.store.put_source_config(&source.id, "activitypub", &merged.to_string()).await?;
+        return Ok((StatusCode::CREATED,Json(source)));
+    }
+    let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
+    let source = state.store.create_source(url.as_str(),&input.kind,input.title.as_deref()).await?;
+    if let Some(config) = input.config {
+        state.store.put_source_config(&source.id, &input.kind, &config.to_string()).await?;
+    }
+    Ok((StatusCode::CREATED,Json(source)))
+-    authorize(&state,&headers)?; let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
++    crate::auth::require_scope(&state,&headers,"write:private").await?; let url=url::Url::parse(&input.url).map_err(|e|Error::Invalid(e.to_string()))?; ingest::validate_public_url(&url).await?;
+     Ok((StatusCode::CREATED,Json(state.store.create_source(url.as_str(),&input.kind,input.title.as_deref()).await?)))
 }
 async fn list_sources(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Source>>>{authorize(&state,&headers)?;Ok(Json(state.store.sources().await?))}
 async fn poll_source(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<Json<Value>>{authorize(&state,&headers)?;let source=state.store.source(&id).await?;let imported=ingest::poll_source(&state,&source).await?;Ok(Json(json!({"imported":imported})))}

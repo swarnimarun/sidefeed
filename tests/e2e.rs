@@ -159,6 +159,49 @@ async fn accept_marks_a_followed_source() {
     assert!(!sidefeed::ap::mark_following_for_actor(&state.store, "https://m.example/users/stranger").await.unwrap());
 }
 
+// ---- Task 4: raw-JSON poller + JSON Feed hardening (lane-ingest) ----
+#[test]
+fn raw_json_pointer_selects_items_and_maps_fields() {
+    let doc = json!({"data":{"posts":[
+        {"uid":"a1","headline":"Hello","link":"https://ex.example/a1","ts":"2026-10-01T00:00:00Z"}]}});
+    let config = sidefeed::channels::RawJsonConfig {
+        items_pointer: "/data/posts".into(), id_field: "uid".into(),
+        title_field: Some("headline".into()), url_field: Some("link".into()),
+        date_field: Some("ts".into()), ..Default::default()
+    };
+    let items = sidefeed::channels::select_items(&doc, &config).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].external_id, "a1");
+    assert_eq!(items[0].title.as_deref(), Some("Hello"));
+}
+
+#[tokio::test]
+async fn source_create_stores_kind_and_config_for_pollers() {
+    let (app, state, _d) = fixture().await;
+    let created = app.clone().oneshot(request("POST", "/api/v1/sources",
+        Some(json!({"url": "https://example.com/data.json", "kind": "raw-json",
+            "config": {"items_pointer": "/data/posts", "id_field": "uid"}})), true)).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let body = json_body(created).await;
+    assert_eq!(body["kind"], "raw-json");
+    let stored = state.store.source_config(body["id"].as_str().unwrap()).await.unwrap().unwrap();
+    assert_eq!(stored.kind, "raw-json");
+    assert!(stored.config_json.contains("/data/posts"));
+    // A non-object config is rejected before any source row exists.
+    let bad = app.clone().oneshot(request("POST", "/api/v1/sources",
+        Some(json!({"url": "https://example.com/other.json", "kind": "raw-json", "config": [1, 2]})), true)).await.unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn webhook_sources_poll_as_a_noop() {
+    let (app, state, _d) = fixture().await;
+    let source = state.store.create_source("webhook:push-only", "webhook", None).await.unwrap();
+    let res = app.oneshot(request("POST", &format!("/api/v1/sources/{}/poll", source.id), None, true)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json_body(res).await["imported"], 0);
+}
+
 async fn json_body(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
