@@ -7,6 +7,9 @@ import { rowDate } from './time';
 import { UpdatesView } from './views/Updates';
 import { ArticlePane } from './views/Article';
 import { FilterBar } from './views/Filters';
+import { ManageView } from './views/Manage';
+import { KeysView } from './views/Keys';
+import { AiView } from './views/Ai';
 import './styles.css';
 
 const withUnread = (items: Item[], unreadOnly: boolean) => (unreadOnly ? items.filter((item) => !isRead(item.id)) : items);
@@ -185,6 +188,12 @@ function Sidebar() {
           {(feed) => <li><A href={`/${feed.slug}`} activeClass="active">{feed.title}</A></li>}
         </For>
       </ul>
+      <p class="side-label">manage</p>
+      <ul class="feeds">
+        <li><A href="/manage" activeClass="active">sources</A></li>
+        <li><A href="/keys" activeClass="active">keys</A></li>
+        <li><A href="/ai" activeClass="active">ai</A></li>
+      </ul>
       <p class="side-label">elsewhere</p>
       <ul class="feeds">
         <li><A href="/updates?hours=168">this week</A></li>
@@ -220,6 +229,9 @@ export default function App() {
       <Route path="/updates" component={UpdatesView} />
       <Route path="/search" component={SearchView} />
       <Route path="/saved" component={SavedView} />
+      <Route path="/manage" component={ManageView} />
+      <Route path="/keys" component={KeysView} />
+      <Route path="/ai" component={AiView} />
       <Route path="/:slug" component={FeedView} />
     </Router>
   );

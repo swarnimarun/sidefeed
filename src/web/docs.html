@@ -5,7 +5,30 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>sidefeed api</title>
-  <link rel="stylesheet" href="/styles.css">
+  <style>
+    /* Inline: the legacy /styles.css is gone and the reader bundle owns
+       app.css, so this page carries its own small stylesheet. */
+    :root { color-scheme: dark; }
+    body { margin: 0; background: #18181b; color: #e4e4e7;
+      font: 14px/1.6 ui-serif, Georgia, Cambria, serif; }
+    a { color: inherit; }
+    .topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; }
+    .brand { display: flex; align-items: center; gap: 8px; }
+    .mark { display: inline-grid; place-items: center; width: 24px; height: 24px;
+      border-radius: 6px; background: #2c2c33; text-decoration: none; }
+    .actions { margin-left: auto; display: flex; gap: 8px; }
+    .btn { border: 1px solid #2b2b30; border-radius: 7px; padding: 4px 12px;
+      text-decoration: none; color: #a1a1aa; font-size: 12px; }
+    .page { max-width: 52rem; margin: 0 auto; padding: 8px 16px 64px; }
+    .eyebrow { color: #71717a; font-size: 12px; letter-spacing: .08em; }
+    .panel { background: #1b1b1e; border: 1px solid #2b2b30; border-radius: 10px;
+      padding: 16px 18px; margin: 16px 0; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-top: 1px solid #2b2b30;
+      vertical-align: top; }
+    code { font-size: 12.5px; color: #cfcfd4; overflow-wrap: anywhere; }
+    footer { text-align: center; color: #71717a; font-size: 12px; }
+  </style>
 </head>
 <body>
   <header class="topbar">

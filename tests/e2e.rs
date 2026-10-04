@@ -252,6 +252,30 @@ async fn ui_health_and_openapi_are_served() {
     assert!(to_bytes(font.into_body(), 2 * 1024 * 1024).await.unwrap().len() > 10_000, "the bundled font is served");
 }
 
+// ---- Task 7: unified SolidJS app (management UI, legacy removal) ----
+#[tokio::test]
+async fn management_bundle_serves_and_legacy_files_are_gone() {
+    let (app, _, _d) = fixture().await;
+    // The management views are client-side routes: each deep-links to the
+    // same committed shell as the reader.
+    for route in ["/manage", "/keys", "/ai"] {
+        let home = app.clone().oneshot(request("GET", route, None, false)).await.unwrap();
+        assert_eq!(home.status(), StatusCode::OK, "{route} serves the SPA shell");
+        assert!(home.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
+    }
+    // The committed bundle is the management UI: it carries the key-minting
+    // view and the sessionStorage-only admin token, never a stored secret.
+    let bundle = std::fs::read_to_string("src/web/dist/app.js").unwrap();
+    assert!(bundle.contains("mint a key"), "dist bundle carries the Keys view");
+    assert!(bundle.contains("sidefeed-admin"), "dist bundle reads the admin token");
+    assert!(!bundle.contains("sidefeed-token"), "no legacy token key in the bundle");
+    for gone in ["src/web/app.js", "src/web/styles.css", "src/web/index.html",
+        "src/db.rs", "src/errors.rs", "src/api/update.rs"] {
+        assert!(!std::path::Path::new(gone).exists(), "{gone} removed");
+    }
+    assert!(!std::path::Path::new("src/db.rs").exists(), "dead actix db layer removed");
+}
+
 #[tokio::test]
 async fn management_api_requires_the_configured_token() {
     let (app, _, _directory) = fixture().await;
