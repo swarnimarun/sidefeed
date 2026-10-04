@@ -31,7 +31,19 @@ export async function toggleBookmark(id: string) {
   const previous = bookmarks();
   setBookmarks(on ? previous.filter((value) => value !== id) : [id, ...previous]);
   try { await (on ? removeBookmark(id) : addBookmark(id)); }
-  catch { setBookmarks(previous); }
+  catch { setBookmarks(previous); toast('could not save the bookmark'); }
+}
+
+/// One transient message rendered as a `role=status` live region in the
+/// layout. Background writes (bookmark rollback, poll, page fetch) land here
+/// so failures are announced instead of failing silently.
+const [toastText, setToastText] = createSignal('');
+export { toastText };
+let toastTimer: number | undefined;
+export function toast(message: string) {
+  setToastText(message);
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => setToastText(''), 4000);
 }
 
 const pinKey = 'sidefeed-pins';

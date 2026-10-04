@@ -1,7 +1,7 @@
 import { A, Route, Router, useNavigate, useParams, useSearchParams } from '@solidjs/router';
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
 import { filterQuery, feeds, feedItems, hostOf, recent, safeUrl, savedItems, search, type Filters as ApiFilters, type Item } from './api';
-import { bookmarks, filtersFromParams, isBookmarked, isPinned, isRead, markRead, paramsFromFilters, pins, syncBookmarks, toggleBookmark, type Filters } from './state';
+import { bookmarks, filtersFromParams, isBookmarked, isPinned, isRead, markRead, paramsFromFilters, pins, syncBookmarks, toast, toastText, toggleBookmark, type Filters } from './state';
 import { decodeEntities, summaryLine } from './text';
 import { rowDate } from './time';
 import { UpdatesView } from './views/Updates';
@@ -24,7 +24,12 @@ function RecentsView() {
     <div class="split">
       <section class="list">
         <FilterBar filters={filters()} onChange={(next) => setParams(Object.fromEntries(new URLSearchParams(paramsFromFilters(next))))} showWindow />
-        <ItemList items={withUnread(items() ?? [], filters().unreadOnly)} selected={(item) => item.id === selected()?.id} onSelect={setSelected} />
+        <ItemList
+          items={withUnread(items() ?? [], filters().unreadOnly)}
+          selected={(item) => item.id === selected()?.id}
+          onSelect={setSelected}
+          empty={<>No items yet — <A href="/manage">add a source in Manage</A>.</>}
+        />
       </section>
       <ArticlePane item={selected()} onTag={() => undefined} onHost={() => undefined} onSelect={setSelected} />
     </div>
@@ -36,14 +41,55 @@ function FeedView() {
   const params = useParams<{ slug: string }>();
   const [query, setQuery] = useSearchParams<Record<string, string>>();
   const filters = () => filtersFromParams(new URLSearchParams(query as Record<string, string>));
-  const [items] = createResource(() => [params.slug, filters()] as const, ([slug, current]) => feedItems(slug, filterQuery(current as ApiFilters)).then((page) => page.items));
+  const [first] = createResource(() => [params.slug, filters()] as const, ([slug, current]) => feedItems(slug, filterQuery(current as ApiFilters)));
+  // Pages accumulate here; `cursor` is undefined while the first page is
+  // pending and null once the server reports no `next_cursor`.
+  const [items, setItems] = createSignal<Item[]>([]);
+  const [cursor, setCursor] = createSignal<string | null | undefined>(undefined);
+  const [loadingMore, setLoadingMore] = createSignal(false);
+  createEffect(() => {
+    const page = first();
+    if (page) {
+      setItems(page.items);
+      setCursor(page.next_cursor ?? null);
+    }
+  });
+  createEffect(() => {
+    // A new feed or filter restarts pagination; the effect above
+    // repopulates once the first page resolves.
+    params.slug;
+    filters();
+    setItems([]);
+    setCursor(undefined);
+  });
+  const loadMore = async () => {
+    const next = cursor();
+    if (next === null || next === undefined || loadingMore() || first.loading) return;
+    setLoadingMore(true);
+    try {
+      const page = await feedItems(params.slug, filterQuery(filters() as ApiFilters), next);
+      setItems((current) => [...current, ...page.items]);
+      setCursor(page.next_cursor ?? null);
+    } catch (failure) {
+      toast((failure as Error).message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
   const [selected, setSelected] = createSignal<Item | undefined>();
   const navigate = useNavigate();
   return (
     <div class="split">
       <section class="list">
         <FilterBar filters={filters()} onChange={(next) => setQuery(Object.fromEntries(new URLSearchParams(paramsFromFilters(next))))} />
-        <ItemList items={withUnread(items() ?? [], filters().unreadOnly)} selected={(item) => item.id === selected()?.id} onSelect={setSelected} />
+        <ItemList
+          items={withUnread(items(), filters().unreadOnly)}
+          selected={(item) => item.id === selected()?.id}
+          onSelect={setSelected}
+          onLoadMore={loadMore}
+          hasMore={cursor() !== null && cursor() !== undefined}
+          empty={<>No items in this feed yet — <A href="/manage">add a source in Manage</A>.</>}
+        />
       </section>
       <ArticlePane
         item={selected()}
@@ -88,7 +134,12 @@ function SearchView() {
           />
           <span class="count">{items()?.length ?? 0} hits</span>
         </div>
-        <ItemList items={withUnread(items() ?? [], false)} selected={(item) => item.id === selected()?.id} onSelect={setSelected} />
+        <ItemList
+          items={withUnread(items() ?? [], false)}
+          selected={(item) => item.id === selected()?.id}
+          onSelect={setSelected}
+          empty={<>{value() ? 'No matches — try fewer or different terms.' : 'Type above to search the whole archive.'}</>}
+        />
       </section>
       <ArticlePane item={selected()} onTag={() => undefined} onHost={() => undefined} onSelect={setSelected} />
     </div>
@@ -114,7 +165,13 @@ function SavedView() {
           <span class="side-label">saved</span>
           <span class="count">{items()?.length ?? 0}</span>
         </div>
-        <ItemList items={items() ?? []} showFeed selected={(item) => item.id === selected()?.id} onSelect={setSelected} />
+        <ItemList
+          items={items() ?? []}
+          showFeed
+          selected={(item) => item.id === selected()?.id}
+          onSelect={setSelected}
+          empty={<>Nothing saved yet — star an item to keep it here.</>}
+        />
       </section>
       <ArticlePane item={selected()} onTag={() => undefined} onHost={() => undefined} onSelect={setSelected} />
     </div>
@@ -122,10 +179,34 @@ function SavedView() {
 }
 
 // ---------------------------------------------------------------- shared pieces
-function ItemList(props: { items: Item[]; selected: (item: Item) => boolean; onSelect: (item: Item) => void; showFeed?: boolean }) {
+function ItemList(props: {
+  items: Item[];
+  selected: (item: Item) => boolean;
+  onSelect: (item: Item) => void;
+  showFeed?: boolean;
+  onLoadMore?: () => void;
+  hasMore?: boolean;
+  empty?: JSX.Element;
+}) {
+  // Infinite scroll: a sentinel row at the end of the list appends the next
+  // `next_cursor` page when it scrolls into view. Views without pagination
+  // simply omit `onLoadMore` and render one page.
+  let sentinel: HTMLLIElement | undefined;
+  createEffect(() => {
+    const load = props.onLoadMore;
+    if (!sentinel || !load || !props.hasMore) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) load();
+      },
+      { rootMargin: '400px' },
+    );
+    observer.observe(sentinel);
+    onCleanup(() => observer.disconnect());
+  });
   return (
     <ol class="items">
-      <For each={props.items} fallback={<li class="note">Nothing here.</li>}>
+      <For each={props.items} fallback={<li class="note">{props.empty ?? 'Nothing here.'}</li>}>
         {(item) => (
           <li class="item-row">
             <button
@@ -160,6 +241,17 @@ function ItemList(props: { items: Item[]; selected: (item: Item) => boolean; onS
           </li>
         )}
       </For>
+      <Show when={props.hasMore && props.items.length}>
+        <li
+          ref={(element) => {
+            sentinel = element;
+          }}
+          class="note"
+          aria-hidden="true"
+        >
+          loading more…
+        </li>
+      </Show>
     </ol>
   );
 }
@@ -212,6 +304,9 @@ function Layout(props: { children?: JSX.Element }) {
         <span class="wordmark">sidefeed</span>
         <nav class="bar-links"><a href="/docs">docs</a></nav>
       </header>
+      <Show when={toastText()}>
+        <div class="toast" role="status">{toastText()}</div>
+      </Show>
       <main class="layout">
         <Sidebar />
         {props.children}

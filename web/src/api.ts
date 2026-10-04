@@ -133,8 +133,10 @@ export const updates = (hours: number) => get<Updates>(`/api/v1/updates?hours=${
 export const recent = (hours: number, filters = '') => get<Item[]>(`/api/v1/recent?hours=${hours}&limit=60${filters}`);
 export const search = (query: string, filters = '') =>
   get<Item[]>(`/api/v1/search?q=${encodeURIComponent(query)}&limit=60${filters}`);
-export const feedItems = (slug: string, filters = '') =>
-  get<Page<Item>>(`/api/v1/feeds/${encodeURIComponent(slug)}/items?limit=60${filters}`);
+export const feedItems = (slug: string, filters = '', cursor?: string) =>
+  get<Page<Item>>(
+    `/api/v1/feeds/${encodeURIComponent(slug)}/items?limit=60${filters}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+  );
 
 /// Saved items and the two mutations behind the reader's bookmark toggle. The
 /// service is the source of truth; the UI stores only the resulting id set.

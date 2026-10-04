@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createResource, createSignal } from 'solid-js';
+import { For, Show, createEffect, createMemo, createResource, createSignal } from 'solid-js';
 import { hostOf, safeUrl, similarItems, type Item } from '../api';
 import { isBookmarked, toggleBookmark } from '../state';
 import { decodeEntities, plainText } from '../text';
@@ -19,6 +19,12 @@ export function ArticlePane(props: { item?: Item; onTag: (tag: string) => void; 
   const article = () => safeUrl(props.item?.url);
   const discussion = createMemo(() => (props.item ? firstDiscussion(props.item) : ''));
   const body = createMemo(() => plainText(props.item?.content || props.item?.summary));
+  // Move focus to the article heading whenever a new item is selected, so
+  // keyboard and screen-reader users land on the content they picked.
+  let heading: HTMLHeadingElement | undefined;
+  createEffect(() => {
+    if (props.item?.id && heading) heading.focus({ preventScroll: true });
+  });
   // Related items are fetched per article, so switching articles refetches.
   const [related] = createResource(() => props.item?.id, (id) => (id ? similarItems(id, 6) : Promise.resolve([] as Item[])));
 
@@ -50,7 +56,14 @@ export function ArticlePane(props: { item?: Item; onTag: (tag: string) => void; 
                   <button type="button" class="linklike" onClick={props.onCategory}>{decodeEntities(item().feed_title || item().feed)}</button>
                 </Show>
               </p>
-              <h1>{decodeEntities(item().title) || 'Untitled'}</h1>
+              <h1
+                ref={(element) => {
+                  heading = element;
+                }}
+                tabindex="-1"
+              >
+                {decodeEntities(item().title) || 'Untitled'}
+              </h1>
               <p class="article-meta">
                 <time>{fullDate(item())}</time>
                 <button
