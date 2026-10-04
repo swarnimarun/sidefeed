@@ -480,28 +480,49 @@ impl Store {
         Ok(())
     }
     // --- end lane-authsec Task 1 ---
+
+    // ---- lane-ingest: node identity + AP source lookup (Task 3) ----
+    // Tiny key/value store for the node actor: the ed25519 seed and small
+    // flags. One row per key; values are opaque to the store.
+
+    /// Read one node-meta value, if it was stored.
+    pub async fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar("SELECT value FROM node_meta WHERE key=?").bind(key).fetch_optional(&self.pool).await?)
+    }
+
+    /// Insert or replace one node-meta value.
+    pub async fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query("INSERT INTO node_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+            .bind(key).bind(value).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Every source config of one poller kind, so the AP layer can find the
+    // source that follows a given actor without parsing JSON in SQL.
+    pub async fn source_configs_by_kind(&self, kind: &str) -> Result<Vec<SourceConfig>> {
+        Ok(sqlx::query_as("SELECT * FROM source_configs WHERE kind=?").bind(kind).fetch_all(&self.pool).await?)
+    }
 +
-+    // ---- lane-ingest: node identity + AP source lookup (Task 3) ----
-+    // Tiny key/value store for the node actor: the ed25519 seed and small
-+    // flags. One row per key; values are opaque to the store.
-+
-+    /// Read one node-meta value, if it was stored.
-+    pub async fn get_meta(&self, key: &str) -> Result<Option<String>> {
-+        Ok(sqlx::query_scalar("SELECT value FROM node_meta WHERE key=?").bind(key).fetch_optional(&self.pool).await?)
++    // ---- Task 5 (onnx-local auto-embed): missing-vector backlog ----
++    // Items this embedding provider has not vectorized yet, newest first.
++    // Mirrors `items_missing_atoms` so vectors backfill like tags do.
++    pub async fn items_missing_embeddings(&self, provider: &str, limit: u32) -> Result<Vec<Item>> {
++        Ok(sqlx::query_as("SELECT i.* FROM items i WHERE NOT EXISTS(SELECT 1 FROM embeddings e WHERE e.item_id=i.id AND e.provider=?) ORDER BY i.published_at DESC LIMIT ?")
++            .bind(provider).bind(limit).fetch_all(&self.pool).await?)
 +    }
 +
-+    /// Insert or replace one node-meta value.
-+    pub async fn set_meta(&self, key: &str, value: &str) -> Result<()> {
-+        sqlx::query("INSERT INTO node_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-+            .bind(key).bind(value).execute(&self.pool).await?;
-+        Ok(())
++    /// How many items still lack vectors for this embedding provider.
++    pub async fn count_missing_embeddings(&self, provider: &str) -> Result<u64> {
++        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM items i WHERE NOT EXISTS(SELECT 1 FROM embeddings e WHERE e.item_id=i.id AND e.provider=?)")
++            .bind(provider).fetch_one(&self.pool).await?)
 +    }
 +
-+    /// Every source config of one poller kind, so the AP layer can find the
-+    // source that follows a given actor without parsing JSON in SQL.
-+    pub async fn source_configs_by_kind(&self, kind: &str) -> Result<Vec<SourceConfig>> {
-+        Ok(sqlx::query_as("SELECT * FROM source_configs WHERE kind=?").bind(kind).fetch_all(&self.pool).await?)
++    /// How many items still lack artifacts from this enricher.
++    pub async fn count_missing_atoms(&self, model: &str) -> Result<u64> {
++        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM items i WHERE NOT EXISTS(SELECT 1 FROM item_enrichments e WHERE e.item_id=i.id AND e.kind='summary' AND e.model=?)")
++            .bind(model).fetch_one(&self.pool).await?)
 +    }
++    // ---- end Task 5 ----
 }
 
 /// Restricts a query that aliases `items` as `i` to a set of derived tags. `all`

@@ -39,6 +39,8 @@ pub trait Enricher: Send + Sync {
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        // ---- Task 5 (onnx-local): unified AI status ----
+        .route("/api/v1/ai/status", get(ai_status))
         .route("/api/v1/feeds/{slug}/tags", get(feed_tags))
         .route("/api/v1/items/{id}/enrich", post(enrich_now))
         // Reader-facing: a public item can be summarised on demand, without a
@@ -469,6 +471,17 @@ pub async fn enrich_loop(state: AppState) {
             Ok(count) => tracing::info!(count, "enriched items"),
             Err(error) => tracing::warn!(%error, "enrichment pass failed"),
         }
+        // ---- Task 5 (onnx-local auto-embed): vectors backfill on the same
+        // tick, so semantic search heals without a second worker. Skipped when
+        // no embedding provider is configured; ingestion never waits on it.
+        if state.config.embedding_provider != "disabled" {
+            match crate::ai::embed_batch(&state).await {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "embedded items"),
+                Err(error) => tracing::warn!(%error, "embedding pass failed"),
+            }
+        }
+        // ---- end Task 5 ----
     }
 }
 
@@ -503,6 +516,37 @@ async fn feed_tags(State(state): State<AppState>, headers: HeaderMap, Path(slug)
     let tags = state.store.feed_tags(&slug, query.limit.unwrap_or(50).clamp(1, 200)).await?;
     Ok(Json(json!(tags.into_iter().map(|(tag, count)| json!({"tag": tag, "count": count})).collect::<Vec<_>>())))
 }
+
+// ---- Task 5 (onnx-local): unified AI status ----
+/// What the AI stage is doing: the live enrich provider plus its backlog, and
+/// the live embedding provider plus its backlog. Always 200, even with both
+/// providers disabled, so the management UI can render without branching.
+async fn ai_status(State(state): State<AppState>) -> Result<Json<Value>> {
+    let (enrich_provider, enrich_model, enrich_pending) = match enricher(&state) {
+        Ok(found) => {
+            let pending = state.store.count_missing_atoms(found.name()).await.unwrap_or(0);
+            let model = if found.name() == "openai-v1" {
+                state.config.enrich.model.clone()
+            } else {
+                None
+            };
+            (found.name().to_string(), model.map(Value::from).unwrap_or(Value::Null), pending)
+        }
+        Err(_) => ("disabled".to_string(), Value::Null, 0),
+    };
+    let (embed_provider, embed_dimensions, embed_pending) = match crate::ai::embedding_provider_name(&state) {
+        Some((name, dimensions)) => {
+            let pending = state.store.count_missing_embeddings(name).await.unwrap_or(0);
+            (name.to_string(), dimensions.map(Value::from).unwrap_or(Value::Null), pending)
+        }
+        None => ("disabled".to_string(), Value::Null, 0),
+    };
+    Ok(Json(json!({
+        "enrich": {"provider": enrich_provider, "model": enrich_model, "pending": enrich_pending},
+        "embeddings": {"provider": embed_provider, "dimensions": embed_dimensions, "pending": embed_pending},
+    })))
+}
+// ---- end Task 5 ----
 
 async fn enrich_now(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<(StatusCode, Json<Atoms>)> {
     authorize(&state, &headers)?;

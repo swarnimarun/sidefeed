@@ -39,7 +39,9 @@ async fn fixture_with_ap_flag(web_dir: Option<std::path::PathBuf>, enrich: Enric
         embedding_url: None,
         embedding_token: None,
         embedding_provider: "disabled".into(),
-        ap_enabled,
+        // ---- Task 5 (onnx-local): no model file in tests; provider stays off.
+        onnx_embed_model: None,
++        ap_enabled,
         enrich,
         web_dir,
         // --- lane-authsec: new config (Tasks 1 + 8, additive) ---
@@ -382,6 +384,40 @@ async fn enrichment_stores_tags_and_summaries_and_serves_them() {
     let missing = app.oneshot(request("GET", "/api/v1/feeds/gfx/items?tag=nothingmatchesthis", None, false)).await.unwrap();
     assert_eq!(json_body(missing).await["items"].as_array().unwrap().len(), 0);
 }
+
+// ---- Task 5 (onnx-local embed wiring + ai status) ----
+fn test_item(external_id: &str) -> NewItem {
+    NewItem {
+        external_id: external_id.into(),
+        url: Some(format!("https://example.com/{external_id}")),
+        title: Some(format!("Item {external_id}")),
+        summary: Some("A short summary with enough words to enrich the item properly.".into()),
+        content: Some("Descriptors keep pipelines coherent. The descriptor index stays compact, and the descriptor table is what the shader reads.".into()),
+        author: None,
+        published_at: "2026-10-04T10:00:00Z".into(),
+        date_source: "published".into(),
+        tags: vec![],
+        raw: None,
+        visibility: "public".into(),
+    }
+}
+
+#[tokio::test]
+async fn ai_status_reports_providers_and_backlog() {
+    let (app, state, _d) = fixture_with_enrichment().await;
+    let source = state.store.create_source("https://example.com/s.xml", "rss", None).await.unwrap();
+    state.store.upsert_item(Some(&source.id), &test_item("s-1")).await.unwrap();
+    let res = app.oneshot(request("GET", "/api/v1/ai/status", None, true)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    // The stored provider name is the stable artifact identifier (`heuristic-v2`),
+    // not the config value: the plan's `"heuristic"` disagrees with the actual
+    // code, so the actual code wins and the assertion follows it.
+    assert_eq!(body["enrich"]["provider"], "heuristic-v2");
+    assert!(body["enrich"]["pending"].as_u64().unwrap() >= 1);
+    assert_eq!(body["embeddings"]["provider"], "disabled");
+}
+// ---- end Task 5 ----
 
 #[tokio::test]
 async fn enrichment_cache_never_grows_past_its_cap() {
