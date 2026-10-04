@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, str::FromStr, time::Duration};
+use std::{env, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone)]
@@ -15,6 +15,8 @@ pub struct Config {
     pub embedding_url: Option<String>,
     pub embedding_token: Option<String>,
     pub embedding_provider: String,
+    /// Optional directory that overrides the embedded UI assets at runtime.
+    pub web_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -32,6 +34,7 @@ impl Config {
             embedding_url: env::var("SIDEFEED_EMBEDDING_URL").ok().filter(|v| !v.is_empty()),
             embedding_token: env::var("SIDEFEED_EMBEDDING_TOKEN").ok().filter(|v| !v.is_empty()),
             embedding_provider: env::var("SIDEFEED_EMBEDDING_PROVIDER").unwrap_or_else(|_| "disabled".into()),
+            web_dir: env::var("SIDEFEED_WEB_DIR").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
         })
     }
 }

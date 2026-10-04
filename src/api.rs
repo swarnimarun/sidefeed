@@ -1,8 +1,8 @@
 use std::{convert::Infallible, time::Duration};
 use async_stream::stream;
-use axum::{body::Bytes, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::{Html, IntoResponse, Response, Sse, sse::Event}, routing::{get, post}, Json, Router};
+use axum::{body::{Body, Bytes}, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Response, Sse, sse::Event}, routing::{get, post}, Json, Router};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use crate::{error::{Error, Result}, ingest, model::{Feed, Item, Page, Source}, AppState};
@@ -11,7 +11,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard)).route("/app.js", get(app_js)).route("/styles.css", get(styles))
         .route("/docs", get(api_docs)).route("/openapi.json", get(openapi))
+        .route("/fonts/{file}", get(font_asset))
         .route("/healthz", get(health)).route("/readyz", get(ready))
+        .route("/api/v1/public/feeds", get(public_feeds))
         .route("/api/v1/sources", get(list_sources).post(create_source))
         .route("/api/v1/sources/{id}/poll", post(poll_source))
         .route("/api/v1/import/opml", post(import_opml))
@@ -29,11 +31,44 @@ pub fn router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http()).with_state(state)
 }
 
-async fn dashboard()->Html<&'static str>{Html(include_str!("web/index.html"))}
-async fn api_docs()->Html<&'static str>{Html(include_str!("web/docs.html"))}
-async fn app_js()->Response{with_type(include_str!("web/app.js").to_owned(),"text/javascript; charset=utf-8")}
-async fn styles()->Response{with_type(include_str!("web/styles.css").to_owned(),"text/css; charset=utf-8")}
-async fn openapi()->Response{with_type(include_str!("web/openapi.json").to_owned(),"application/json; charset=utf-8")}
+// The interface is compiled into the binary, but `SIDEFEED_WEB_DIR` lets an
+// operator override any asset (index.html, app.js, styles.css, docs.html,
+// openapi.json, fonts) from a directory on the host. Assets are read per
+// request, so the UI can be edited on a running service without rebuilding or
+// restarting it. Override files sit flat in that directory, even for fonts.
+fn embedded_asset(name:&str)->Option<(&'static [u8],&'static str)>{
+    Some(match name{
+        "index.html"=>(include_str!("web/index.html").as_bytes(),"text/html; charset=utf-8"),
+        "app.js"=>(include_str!("web/app.js").as_bytes(),"text/javascript; charset=utf-8"),
+        "styles.css"=>(include_str!("web/styles.css").as_bytes(),"text/css; charset=utf-8"),
+        "docs.html"=>(include_str!("web/docs.html").as_bytes(),"text/html; charset=utf-8"),
+        "openapi.json"=>(include_str!("web/openapi.json").as_bytes(),"application/json; charset=utf-8"),
+        "Libron-Regular.woff2"=>(include_bytes!("web/fonts/Libron-Regular.woff2"),"font/woff2"),
+        "Libron-Italic.woff2"=>(include_bytes!("web/fonts/Libron-Italic.woff2"),"font/woff2"),
+        "Libron-Bold.woff2"=>(include_bytes!("web/fonts/Libron-Bold.woff2"),"font/woff2"),
+        _=>return None,
+    })
+}
+async fn web_asset(state:&AppState,name:&str)->Response{
+    let Some((embedded,content_type))=embedded_asset(name) else {return (StatusCode::NOT_FOUND,"unknown asset").into_response()};
+    if let Some(directory)=&state.config.web_dir{
+        if let Ok(body)=tokio::fs::read(directory.join(name)).await{return with_bytes(body,content_type);}
+    }
+    with_bytes(embedded.to_vec(),content_type)
+}
+async fn font_asset(State(state):State<AppState>,Path(file):Path<String>)->Response{web_asset(&state,&file).await}
+async fn dashboard(State(state):State<AppState>)->Response{web_asset(&state,"index.html").await}
+async fn api_docs(State(state):State<AppState>)->Response{web_asset(&state,"docs.html").await}
+async fn app_js(State(state):State<AppState>)->Response{web_asset(&state,"app.js").await}
+async fn styles(State(state):State<AppState>)->Response{web_asset(&state,"styles.css").await}
+async fn openapi(State(state):State<AppState>)->Response{web_asset(&state,"openapi.json").await}
+
+/// Public feed index for the read-only reader interface. Management views keep
+/// requiring the admin token; this projection exposes only feeds marked public.
+#[derive(Serialize)] struct PublicFeed { slug:String, title:String, description:Option<String> }
+async fn public_feeds(State(state):State<AppState>)->Result<Json<Vec<PublicFeed>>>{
+    Ok(Json(state.store.feeds().await?.into_iter().filter(|feed|feed.public).map(|feed|PublicFeed{slug:feed.slug,title:feed.title,description:feed.description}).collect()))
+}
 
 async fn health() -> Json<Value> { Json(json!({"status":"ok","version":env!("CARGO_PKG_VERSION")})) }
 async fn ready(State(state): State<AppState>) -> Result<Json<Value>> { state.store.ping().await?; Ok(Json(json!({"status":"ready"}))) }
@@ -102,4 +137,5 @@ pub(crate) async fn access_feed(state:&AppState,headers:&HeaderMap,slug:&str)->R
 pub(crate) fn authorize(state:&AppState,headers:&HeaderMap)->Result<()>{let Some(expected)=&state.config.admin_token else{return Ok(())};let supplied=headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer "));if supplied==Some(expected.as_str()){Ok(())}else{Err(Error::Unauthorized)}}
 fn validate_slug(slug:&str)->Result<()>{if slug.is_empty()||slug.len()>64||!slug.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'-'){Err(Error::Invalid("slug must contain lowercase letters, digits, or hyphens".into()))}else{Ok(())}}
 fn esc(value:&str)->String{value.replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;").replace('"',"&quot;").replace('\'',"&#39;")}
-fn with_type(body:String,content_type:&'static str)->Response{let mut response=body.into_response();response.headers_mut().insert(header::CONTENT_TYPE,HeaderValue::from_static(content_type));response}
+fn with_type(body:String,content_type:&'static str)->Response{with_bytes(body.into_bytes(),content_type)}
+fn with_bytes(body:Vec<u8>,content_type:&'static str)->Response{let mut response=Body::from(body).into_response();response.headers_mut().insert(header::CONTENT_TYPE,HeaderValue::from_static(content_type));response}

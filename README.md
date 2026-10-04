@@ -19,13 +19,21 @@ docker compose up --build
 For a native build, install stable Rust and run `cargo run`. The default listen
 address is `0.0.0.0:8080`; data is stored in `sidefeed.db`.
 
-Open `http://localhost:8080/` for the embedded management dashboard. API
-documentation is available at `/docs`, with an OpenAPI 3.1 document at
-`/openapi.json`. The UI has no separate runtime or asset server and is compiled
-into the Sidefeed binary.
+Open `http://localhost:8080/` for the reader: a read-only, unauthenticated
+view of every feed marked `public`. It never asks for a token and cannot create
+or change anything — adding sources and feeds goes through the API below, with
+reference documentation at `/docs` and an OpenAPI 3.1 document at
+`/openapi.json`.
+
+The reader is compiled into the Sidefeed binary, so there is no separate asset
+server. Point `SIDEFEED_WEB_DIR` at a directory to override `index.html`,
+`app.js`, `styles.css`, `docs.html`, or `openapi.json`. Those files are read per
+request, so UI edits go live without rebuilding the binary or restarting the
+service.
 
 Set a strong `SIDEFEED_ADMIN_TOKEN` outside a localhost-only deployment. Pass it
-as `Authorization: Bearer <token>` to management routes.
+as `Authorization: Bearer <token>` to management routes. Feeds marked `public`
+can be read without a token; everything else requires it.
 
 ## First feed
 
@@ -55,7 +63,9 @@ curl http://localhost:8080/feeds/reading/thread.json
 ```
 
 Import an OPML document by posting it as the request body to
-`/api/v1/import/opml`. Search uses SQLite FTS5 at
+`/api/v1/import/opml`. Only feeds created with `public: true` appear in the
+reader; `GET /api/v1/public/feeds` is the unauthenticated index it uses. Search
+uses SQLite FTS5 at
 `/api/v1/feeds/{slug}/search?q=terms`. Live consumers can subscribe to
 `/api/v1/feeds/{slug}/stream`.
 
