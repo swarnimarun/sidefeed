@@ -122,7 +122,8 @@ const read = (() => {
 // ---------------------------------------------------------------- state
 const state = {
   feeds: [], slug: '', items: [], selected: null, stream: null,
-  mode: 'feed',        // feed | recent | search
+  mode: 'feed',        // feed | recent | search | updates
+  host: '',            // "more from this site" filter
   query: '',           // active search text
   tags: [],            // selected tags, server side filtered
   matchAll: false,     // every tag instead of any
@@ -229,6 +230,7 @@ function renderArticle(item) {
   const generated = !body && item.ai_summary ? plainText(item.ai_summary) : '';
   const feedName = item.feedLabel || feed?.title || item.feedSlug || state.slug;
   const tags = Array.isArray(item.tags) ? item.tags : [];
+  const articleHost = (() => { try { return new URL(article).host; } catch { return ''; } })();
   $('#article').innerHTML = `
     <header class="article-head">
       <p class="kicker">
@@ -238,6 +240,7 @@ function renderArticle(item) {
       <p class="article-meta">
         <time datetime="${escapeHtml(item.published_at)}">${escapeHtml(longDate(item.published_at))}</time>
         ${article ? ` <span class="sep">/</span> <a href="${escapeHtml(article)}" target="_blank" rel="noopener noreferrer">original</a>` : ''}
+        ${articleHost ? ` <button type="button" class="opt" data-host="${escapeHtml(articleHost)}" title="show everything from ${escapeHtml(articleHost)}">more from ${escapeHtml(articleHost)}</button>` : ''}
         ${discussion ? ` <span class="sep">/</span> <a href="${escapeHtml(discussion)}" target="_blank" rel="noopener noreferrer">comments</a>` : ''}
       </p>
   ${tags.length ? `<p class="tags">${tags.map((tag) => `<button type="button" class="tag${state.tags.includes(tag) ? ' on' : ''}" data-tag="${escapeHtml(tag)}" title="filter by ${escapeHtml(tag)}">${escapeHtml(tag)}</button>`).join('')}</p>` : ''}
@@ -245,6 +248,8 @@ function renderArticle(item) {
     <div class="article-body">${body ? escapeHtml(body) : (generated ? escapeHtml(generated) : '<p class="note">No body text in the feed.</p>')}</div>
     ${generated ? '<p class="ai-note">generated summary</p>' : ''}`;
   for (const button of $$('#article .tag[data-tag]')) button.onclick = () => toggleTag(button.dataset.tag);
+  const hostButton = $('#article [data-host]');
+  if (hostButton) hostButton.onclick = () => setHost(hostButton.dataset.host);
 }
 
 async function renderDigest(slug) {
@@ -311,10 +316,13 @@ function renderFilterbar() {
   if (state.tags.length > 1) {
     parts.push(`<span class="filter-group">match<button type="button" class="opt${state.matchAll ? '' : ' on'}" data-match="any">any</button><button type="button" class="opt${state.matchAll ? ' on' : ''}" data-match="all">all</button></span>`);
   }
+  if (state.host) {
+    parts.push(`<span class="filter-group tags"><button type="button" class="tag on" data-clear-host="1" title="clear the site filter">${escapeHtml(state.host)} ✕</button></span>`);
+  }
   if (state.tags.length) {
     parts.push(`<span class="filter-group tags">${state.tags.map((tag) => `<button type="button" class="tag on" data-clear="${escapeHtml(tag)}">${escapeHtml(tag)} ✕</button>`).join('')}</span>`);
   }
-  if (state.tags.length || state.unreadOnly || state.oldest) {
+  if (state.tags.length || state.unreadOnly || state.oldest || state.host) {
     parts.push('<button type="button" class="opt reset" data-reset="1">clear</button>');
   }
   bar.hidden = parts.length === 0;
@@ -324,8 +332,19 @@ function renderFilterbar() {
   for (const button of $$('#filterbar [data-unread]')) button.onclick = () => { state.unreadOnly = !state.unreadOnly; loadItems(state.slug, { quiet: true }); };
   for (const button of $$('#filterbar [data-match]')) button.onclick = () => { state.matchAll = button.dataset.match === 'all'; loadItems(state.slug, { quiet: true }); renderFilterbar(); };
   for (const button of $$('#filterbar [data-clear]')) button.onclick = () => toggleTag(button.dataset.clear);
+  const clearHost = $('#filterbar [data-clear-host]');
+  if (clearHost) clearHost.onclick = () => setHost('');
   const reset = $('#filterbar [data-reset]');
-  if (reset) reset.onclick = () => { state.tags = []; state.unreadOnly = false; state.oldest = false; loadItems(state.slug, { quiet: true }); renderFilterbar(); renderTagBrowser(); };
+  if (reset) reset.onclick = () => { state.tags = []; state.host = ''; state.unreadOnly = false; state.oldest = false; loadItems(state.slug, { quiet: true }); renderFilterbar(); renderTagBrowser(); };
+}
+
+/// "More from this site": narrows the current view to one host. Works in feed,
+/// recents and search views because they all take the same filter.
+function setHost(host) {
+  state.host = host || '';
+  state.selected = null;
+  loadItems(state.slug, { quiet: true });
+  renderFilterbar();
 }
 
 /// Tags accumulate: each click narrows further, which is what makes the tag
@@ -365,6 +384,7 @@ function showDigest(flag) {
 async function selectUpdates({ push = true } = {}) {
   state.mode = 'updates';
   state.tags = [];
+  state.host = '';
   state.selected = null;
   state.items = [];
   renderItems();
@@ -441,6 +461,7 @@ async function loadItems(slug, { quiet = false } = {}) {
       state.tags.length ? `tag=${encodeURIComponent(state.tags.join(','))}` : '',
       state.matchAll ? 'matching=all' : '',
       state.oldest ? 'order=oldest' : '',
+      state.host ? `host=${encodeURIComponent(state.host)}` : '',
     ].filter(Boolean).join('&');
     let items;
     if (mode === 'search' && state.query) {
@@ -482,6 +503,7 @@ async function loadItems(slug, { quiet = false } = {}) {
 async function selectRecent({ push = true } = {}) {
   state.mode = 'recent';
   state.tags = [];
+  state.host = '';
   state.selected = null;
   state.items = [];
   renderItems();
@@ -571,6 +593,7 @@ window.addEventListener('popstate', () => { applyRoute(); });
 async function selectFeed(slug) {
   state.mode = 'feed';
   state.tags = [];
+  state.host = '';
   state.query = '';
   $('#search').value = '';
   state.slug = slug;

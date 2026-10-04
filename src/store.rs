@@ -14,6 +14,7 @@ pub struct SearchOptions<'a> {
     pub since: &'a str,
     pub limit: u32,
     pub feed: Option<&'a str>,
+    pub host: Option<&'a str>,
     pub tags: &'a [String],
     pub all_tags: bool,
     pub oldest_first: bool,
@@ -106,21 +107,23 @@ impl Store {
     }
 
     pub async fn feed_items(&self, slug: &str, limit: u32, cursor: Option<&str>) -> Result<Vec<Item>> {
-        self.feed_items_tagged(slug, limit, cursor, &[], false).await
+        self.feed_items_tagged(slug, limit, cursor, &[], false, None).await
     }
 
     /// Same listing, optionally narrowed to tags. `all` requires every tag to be
     /// present, otherwise any one of them is enough.
-    pub async fn feed_items_tagged(&self, slug: &str, limit: u32, cursor: Option<&str>, tags: &[String], all: bool) -> Result<Vec<Item>> {
+    pub async fn feed_items_tagged(&self, slug: &str, limit: u32, cursor: Option<&str>, tags: &[String], all: bool, host: Option<&str>) -> Result<Vec<Item>> {
         let feed = self.feed(slug).await?;
         let cursor = cursor.unwrap_or("9999-12-31T23:59:59Z");
         let mut sql = String::from("SELECT i.* FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND i.published_at<?");
         append_tag_clause(&mut sql, tags, all);
+        append_host_clause(&mut sql, host);
         sql.push_str(" ORDER BY i.published_at DESC,i.id DESC LIMIT ?");
 
         let mut query = sqlx::query_as::<_, Item>(&sql).bind(&feed.id).bind(cursor);
         for tag in tags { query = query.bind(tag); }
         if all && !tags.is_empty() { query = query.bind(tags.len() as i64); }
+        if let Some(host) = host { query = query.bind(host_pattern(host)); }
         let mut items: Vec<Item> = query.bind(limit).fetch_all(&self.pool).await?;
         items.retain(|i| matches_filter(&feed, i)); Ok(items)
     }
@@ -194,14 +197,16 @@ impl Store {
     /// Public items published inside a window, across every public feed. One row
     /// per item even when several feeds carry it, so the caller can rank across
     /// sources without duplicates.
-    pub async fn recent_items(&self, since: &str, limit: u32, tags: &[String], all: bool) -> Result<Vec<ItemWithFeed>> {
+    pub async fn recent_items(&self, since: &str, limit: u32, tags: &[String], all: bool, host: Option<&str>) -> Result<Vec<ItemWithFeed>> {
         let mut sql = String::from("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.public=1 AND i.visibility='public' AND i.published_at>=?");
         append_tag_clause(&mut sql, tags, all);
+        append_host_clause(&mut sql, host);
         sql.push_str(" GROUP BY i.id ORDER BY i.published_at DESC LIMIT ?");
 
         let mut query = sqlx::query_as::<_, ItemWithFeed>(&sql).bind(since);
         for tag in tags { query = query.bind(tag); }
         if all && !tags.is_empty() { query = query.bind(tags.len() as i64); }
+        if let Some(host) = host { query = query.bind(host_pattern(host)); }
         Ok(query.bind(limit).fetch_all(&self.pool).await?)
     }
 
@@ -226,7 +231,7 @@ impl Store {
     /// FTS5 only allows `bm25()` in a query that scans the index directly, so
     /// ranking happens in an inner scan and the joins run outside it.
     pub async fn search_public(&self, options: SearchOptions<'_>) -> Result<Vec<ItemWithFeed>> {
-        let SearchOptions { query, since, limit, feed, tags, all_tags, oldest_first } = options;
+        let SearchOptions { query, since, limit, feed, host, tags, all_tags, oldest_first } = options;
         let (inner, rank_bound) = if oldest_first {
             ("SELECT item_id FROM items_fts WHERE items_fts MATCH ? LIMIT 5000".to_string(), None)
         } else {
@@ -236,6 +241,7 @@ impl Store {
         let mut sql = format!("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM ({inner}) fts JOIN items i ON i.id=fts.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.public=1 AND i.published_at>=?");
         if feed.is_some() { sql.push_str(" AND f.slug=?"); }
         append_tag_clause(&mut sql, tags, all_tags);
+        append_host_clause(&mut sql, host);
         sql.push_str(" GROUP BY i.id ORDER BY ");
         sql.push_str(if oldest_first { "i.published_at ASC" } else { "MIN(fts.rank), i.published_at DESC" });
         sql.push_str(" LIMIT ?");
@@ -246,6 +252,7 @@ impl Store {
         if let Some(slug) = feed { builder = builder.bind(slug); }
         for tag in tags { builder = builder.bind(tag); }
         if all_tags && !tags.is_empty() { builder = builder.bind(tags.len() as i64); }
+        if let Some(host) = host { builder = builder.bind(host_pattern(host)); }
         Ok(builder.bind(limit).fetch_all(&self.pool).await?)
     }
 
@@ -290,6 +297,14 @@ impl Store {
 /// requires every tag; otherwise any one of them is enough. Placeholders are
 /// appended in order, so callers must bind the tags (and then the count for
 /// `all`) in the same order they appear in `tags`.
+/// Restricts a listing to links published on one host, which is how "more from
+/// this site" works. Matches the host component of the item URL.
+fn append_host_clause(sql: &mut String, host: Option<&str>) {
+    if host.is_some() { sql.push_str(" AND i.url LIKE ?"); }
+}
+
+fn host_pattern(host: &str) -> String { format!("%://{host}/%") }
+
 fn append_tag_clause(sql: &mut String, tags: &[String], all: bool) {
     if tags.is_empty() { return; }
     let placeholders = vec!["?"; tags.len()].join(",");

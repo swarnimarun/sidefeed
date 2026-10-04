@@ -78,7 +78,7 @@ async fn public_feeds(State(state):State<AppState>)->Result<Json<Vec<PublicFeed>
     Ok(Json(state.store.feeds().await?.into_iter().filter(|feed|feed.public).map(|feed|PublicFeed{slug:feed.slug,title:feed.title,description:feed.description}).collect()))
 }
 
-#[derive(Deserialize)] struct RecentQuery {hours:Option<u32>,limit:Option<u32>,tag:Option<String>,matching:Option<String>}
+#[derive(Deserialize)] struct RecentQuery {hours:Option<u32>,limit:Option<u32>,tag:Option<String>,matching:Option<String>,host:Option<String>}
 #[derive(Serialize)] struct RecentItem {#[serde(flatten)] item:Item,feed:String,feed_title:String,tags:Vec<String>,ai_summary:Option<String>,score:f32}
 
 /// Tag counts across every public feed in a window, for the tag browser when no
@@ -98,8 +98,9 @@ async fn recent(State(state):State<AppState>,Query(q):Query<RecentQuery>)->Resul
     let hours=q.hours.unwrap_or(48).clamp(1,336);
     let limit=q.limit.unwrap_or(40).clamp(1,200);
     let (tags,all)=parse_tags(q.tag.as_deref(),q.matching.as_deref());
+    let host=host_param(q.host.as_deref());
     let since=(Utc::now()-chrono::Duration::hours(hours as i64)).to_rfc3339();
-    let rows=state.store.recent_items(&since,limit.saturating_mul(4).min(400),&tags,all).await?;
+    let rows=state.store.recent_items(&since,limit.saturating_mul(4).min(400),&tags,all,host.as_deref()).await?;
     let now=Utc::now();
     let mut per_source:HashMap<String,usize>=HashMap::new();
     let mut scored:Vec<(f32,ItemWithFeed)>=rows.into_iter().map(|row|{
@@ -136,7 +137,7 @@ async fn updates(State(state):State<AppState>,Query(q):Query<UpdatesQuery>)->Res
     Ok(Json(crate::enrich::updates(&state,q.hours.unwrap_or(48).clamp(1,168)).await?))
 }
 
-#[derive(Deserialize)] struct SearchAllQuery {q:String,hours:Option<u32>,limit:Option<u32>,feed:Option<String>,tag:Option<String>,matching:Option<String>,order:Option<String>}
+#[derive(Deserialize)] struct SearchAllQuery {q:String,hours:Option<u32>,limit:Option<u32>,feed:Option<String>,tag:Option<String>,matching:Option<String>,order:Option<String>,host:Option<String>}
 #[derive(Serialize)] struct FeedHit {#[serde(flatten)] item:Item,feed:String,feed_title:String,tags:Vec<String>,ai_summary:Option<String>}
 
 /// User text becomes an FTS5 expression: each word is quoted and prefix-matched,
@@ -163,8 +164,9 @@ async fn search_all(State(state):State<AppState>,Query(q):Query<SearchAllQuery>)
         None=>"1970-01-01T00:00:00Z".to_string(),
     };
     let feed=q.feed.as_deref().map(str::trim).filter(|value|!value.is_empty());
+    let host=host_param(q.host.as_deref());
     let rows=state.store.search_public(crate::store::SearchOptions{
-        query:&query,since:&since,limit,feed,tags:&tags,all_tags:all,oldest_first:oldest,
+        query:&query,since:&since,limit,feed,host:host.as_deref(),tags:&tags,all_tags:all,oldest_first:oldest,
     }).await?;
     let ids:Vec<String>=rows.iter().map(|row|row.item.id.clone()).collect();
     let atoms=crate::enrich::atoms_for(&state,&ids).await.unwrap_or_default();
@@ -196,7 +198,18 @@ async fn create_feed(State(state):State<AppState>,headers:HeaderMap,Json(input):
 async fn list_feeds(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Feed>>>{authorize(&state,&headers)?;Ok(Json(state.store.feeds().await?))}
 async fn attach_source(State(state):State<AppState>,headers:HeaderMap,Path((slug,source_id)):Path<(String,String)>)->Result<StatusCode>{authorize(&state,&headers)?;state.store.attach_source(&slug,&source_id).await?;Ok(StatusCode::NO_CONTENT)}
 
-#[derive(Deserialize)] struct PageQuery {limit:Option<u32>,cursor:Option<String>,tag:Option<String>,matching:Option<String>}
+#[derive(Deserialize)] struct PageQuery {limit:Option<u32>,cursor:Option<String>,tag:Option<String>,matching:Option<String>,host:Option<String>}
+
+/// Accepts either a bare host or a whole URL, because the UI offers "more from
+/// this site" from an article link.
+fn host_param(value: Option<&str>) -> Option<String> {
+    let raw = value?.trim().to_lowercase();
+    if raw.is_empty() { return None; }
+    let host = raw.split("//").last().unwrap_or(&raw).split('/').next().unwrap_or(&raw);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() { None } else { Some(host.to_string()) }
+}
 
 /// Tags arrive comma separated, matching what the reader sends after the user
 /// clicks a few. `matching=all` switches from any-of to every-of.
@@ -212,7 +225,8 @@ fn parse_tags(tag: Option<&str>, matching: Option<&str>) -> (Vec<String>, bool) 
 async fn feed_items(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>,Query(q):Query<PageQuery>)->Result<Json<Page<EnrichedItem>>>{
     access_feed(&state,&headers,&slug).await?;let limit=q.limit.unwrap_or(50).clamp(1,200);
     let (tags,all)=parse_tags(q.tag.as_deref(),q.matching.as_deref());
-    let items=state.store.feed_items_tagged(&slug,limit,q.cursor.as_deref(),&tags,all).await?;
+    let host=host_param(q.host.as_deref());
+    let items=state.store.feed_items_tagged(&slug,limit,q.cursor.as_deref(),&tags,all,host.as_deref()).await?;
     let next_cursor=if items.len()==limit as usize{items.last().map(|i|i.published_at.clone())}else{None};
     // One query for the whole page's derived artifacts, then one small cache fill.
     let ids:Vec<String>=items.iter().map(|item|item.id.clone()).collect();

@@ -367,7 +367,7 @@ impl UpdatesCache {
 pub async fn updates(state: &AppState, hours: u32) -> Result<Updates> {
     if let Some(cached) = state.updates.get(hours).await { return Ok(cached); }
     let since = (chrono::Utc::now() - chrono::Duration::hours(hours as i64)).to_rfc3339();
-    let rows = state.store.recent_items(&since, 300, &[], false).await?;
+    let rows = state.store.recent_items(&since, 300, &[], false, None).await?;
 
     // Rows arrive newest first, so the first appearance of a feed fixes the
     // category order: the busiest recent category leads.
