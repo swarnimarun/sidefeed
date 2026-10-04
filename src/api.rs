@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashMap, convert::Infallible, time::Duration};
+use std::{cmp::Ordering, collections::{hash_map::Entry, HashMap}, convert::Infallible, time::Duration};
 use async_stream::stream;
 use axum::{body::{Body, Bytes}, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri}, response::{IntoResponse, Response, Sse, sse::Event}, routing::{get, post}, Json, Router};
 use include_dir::{include_dir, Dir};
@@ -17,6 +17,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/recent", get(recent))
         .route("/api/v1/updates", get(updates))
         .route("/api/v1/search", get(search_all))
+        .route("/api/v1/bookmarks", get(list_bookmarks))
+        .route("/api/v1/items/{id}/bookmark", post(add_bookmark).delete(remove_bookmark))
+        .route("/api/v1/items/{id}/similar", get(similar))
         .route("/api/v1/sources", get(list_sources).post(create_source))
         .route("/api/v1/sources/{id}/poll", post(poll_source))
         .route("/api/v1/import/opml", post(import_opml))
@@ -201,6 +204,68 @@ async fn search_all(State(state):State<AppState>,Query(q):Query<SearchAllQuery>)
         let derived=atoms.get(&row.item.id).cloned().unwrap_or_default();
         FeedHit{feed:row.feed_slug,feed_title:row.feed_title,item:row.item,tags:derived.tags,ai_summary:derived.summary}
     }).collect()))
+}
+
+#[derive(Serialize)] struct SavedHit { #[serde(flatten)] item: Item, feed:String, feed_title:String, saved_at:String, tags:Vec<String>, ai_summary:Option<String> }
+#[derive(Serialize)] struct SimilarHit { #[serde(flatten)] item: Item, feed:String, feed_title:String, tags:Vec<String>, ai_summary:Option<String>, score:f32 }
+
+/// The reader's saved list. Token-free, like the rest of the public read path.
+async fn list_bookmarks(State(state):State<AppState>)->Result<Json<Vec<SavedHit>>>{
+    let rows=state.store.saved_items(500).await?;
+    let ids:Vec<String>=rows.iter().map(|row|row.item.id.clone()).collect();
+    let atoms=crate::enrich::atoms_for(&state,&ids).await.unwrap_or_default();
+    Ok(Json(rows.into_iter().map(|row|{let derived=atoms.get(&row.item.id).cloned().unwrap_or_default();SavedHit{item:row.item,feed:row.feed_slug,feed_title:row.feed_title,saved_at:row.saved_at,tags:derived.tags,ai_summary:derived.summary}}).collect()))
+}
+
+/// How many items one node will save. Bounds a token-free write route.
+const BOOKMARK_LIMIT: i64 = 2000;
+async fn add_bookmark(State(state):State<AppState>,Path(id):Path<String>)->Result<StatusCode>{state.store.bookmark(&id,BOOKMARK_LIMIT).await?;Ok(StatusCode::NO_CONTENT)}
+async fn remove_bookmark(State(state):State<AppState>,Path(id):Path<String>)->Result<StatusCode>{state.store.unbookmark(&id).await?;Ok(StatusCode::NO_CONTENT)}
+
+#[derive(Deserialize)] struct SimilarQuery {limit:Option<u32>}
+
+fn host_of(url:Option<&str>)->Option<String>{ url::Url::parse(url?).ok()?.host_str().map(str::to_string) }
+
+/// Related items for one article, blending four signals: the same source, the
+/// same host, shared derived tags, and shared title keywords. Each signal adds
+/// to one score per candidate, so an item that matches several ways ranks
+/// first. Token-free, because it only ever describes public items.
+async fn similar(State(state):State<AppState>,Path(id):Path<String>,Query(q):Query<SimilarQuery>)->Result<Json<Vec<SimilarHit>>>{
+    let item=state.store.item(&id).await?;
+    let limit=q.limit.unwrap_or(8).clamp(1,50);
+    let pool=limit.saturating_mul(8).min(200);
+    let model=crate::enrich::enricher(&state).map(|enricher|enricher.name().to_string()).ok();
+    let tags=match &model{Some(name)=>state.store.atoms(&id,name).await.map(|atoms|atoms.tags).unwrap_or_default(),None=>Vec::new()};
+    let mut scored:HashMap<String,(f32,ItemWithFeed)>=HashMap::new();
+    if let Some(name)=&model{
+        for (overlap,row) in state.store.similar_by_tags(&id,name,&tags,pool).await?{add_candidate(&mut scored,row,overlap as f32*2.0);}
+    }
+    if let Some(source_id)=item.source_id.as_deref(){
+        for row in state.store.similar_by_source(source_id,&id,pool).await?{add_candidate(&mut scored,row,3.0);}
+    }
+    if let Some(host)=host_of(item.url.as_deref()){
+        for row in state.store.similar_by_host(&host,&id,pool).await?{add_candidate(&mut scored,row,2.0);}
+    }
+    let terms=crate::enrich::keywords(item.title.as_deref().unwrap_or(""));
+    if !terms.is_empty(){
+        let query=terms.iter().map(|term|format!("\"{term}\"")).collect::<Vec<_>>().join(" OR ");
+        for row in state.store.similar_by_terms(&query,&id,pool).await?{add_candidate(&mut scored,row,1.0);}
+    }
+    let mut ranked:Vec<(f32,ItemWithFeed)>=scored.into_values().collect();
+    ranked.sort_by(|left,right|right.0.partial_cmp(&left.0).unwrap_or(Ordering::Equal).then_with(||right.1.item.published_at.cmp(&left.1.item.published_at)));
+    ranked.truncate(limit as usize);
+    let ids:Vec<String>=ranked.iter().map(|(_,row)|row.item.id.clone()).collect();
+    let atoms=crate::enrich::atoms_for(&state,&ids).await.unwrap_or_default();
+    Ok(Json(ranked.into_iter().map(|(score,row)|{let derived=atoms.get(&row.item.id).cloned().unwrap_or_default();SimilarHit{item:row.item,feed:row.feed_slug,feed_title:row.feed_title,tags:derived.tags,ai_summary:derived.summary,score}}).collect()))
+}
+
+/// Adds one signal's weight to a candidate, or inserts it the first time the
+/// item appears.
+fn add_candidate(scored:&mut HashMap<String,(f32,ItemWithFeed)>,row:ItemWithFeed,weight:f32){
+    match scored.entry(row.item.id.clone()){
+        Entry::Occupied(mut found)=>{found.get_mut().0+=weight;}
+        Entry::Vacant(slot)=>{slot.insert((weight,row));}
+    }
 }
 
 async fn health() -> Json<Value> { Json(json!({"status":"ok","version":env!("CARGO_PKG_VERSION")})) }

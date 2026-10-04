@@ -8,7 +8,15 @@ second layer because DNS can change after resolution.
 
 Set `SIDEFEED_ADMIN_TOKEN` on every internet-accessible node. Without it,
 administrative endpoints are intentionally open for single-user localhost
-deployments. Public feeds require no token; private feeds and all mutations do.
+deployments. Public feeds and the reader's saved list require no token; private
+feeds and every other mutation do.
+
+The bookmark routes are the one token-free write. They are single-user and
+bounded: the node refuses to store more than a fixed number of bookmarks, and
+saving only ever references an item that already exists, so the route cannot be
+used to inject content. On a shared or hostile network, front the service with
+a reverse proxy that restricts `POST`/`DELETE` on `/api/v1/items/*/bookmark` if
+you do not want the saved list to be world-writable.
 
 Peers are explicitly configured and authenticate exports with HMAC-SHA256.
 Both peers must use the same 32-or-more-character secret. Signatures cover the

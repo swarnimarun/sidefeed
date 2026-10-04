@@ -117,7 +117,7 @@ fn resolve_url(base: &Url, href: &str) -> String {
 }
 
 fn normalize_entry(entry: &Entry) -> NewItem {
-    let published = entry.published.or(entry.updated).map(|v| v.to_rfc3339()).unwrap_or_else(|| Utc::now().to_rfc3339());
+    let (published_at, date_source) = dated(entry.published.map(|v| v.to_rfc3339()), entry.updated.map(|v| v.to_rfc3339()));
     let body = entry.content.as_ref().and_then(|v| v.body.clone());
     let summary = entry.summary.as_ref().map(|v| v.content.clone());
     NewItem {
@@ -127,9 +127,18 @@ fn normalize_entry(entry: &Entry) -> NewItem {
         summary,
         content: body,
         author: entry.authors.first().map(|v| v.name.clone()),
-        published_at: published,
+        published_at, date_source,
         tags: entry.categories.iter().map(|v| v.term.clone()).collect(), raw: None, visibility: "public".into(),
     }
+}
+
+/// A feed's own date and where it came from. Prefer the posted date, fall back
+/// to last-modified, and only then to the fetch time — recorded as `fetched` so
+/// the reader can label it instead of showing it as the post date.
+fn dated(published: Option<String>, updated: Option<String>) -> (String, String) {
+    if let Some(value) = published { return (value, "published".into()); }
+    if let Some(value) = updated { return (value, "updated".into()); }
+    (Utc::now().to_rfc3339(), "fetched".into())
 }
 
 // ---------------------------------------------------------------- link cleanup
@@ -200,11 +209,14 @@ fn parse_json(bytes: &[u8], base: &Url) -> Result<(Option<String>, Vec<NewItem>)
     let value: Value = serde_json::from_slice(bytes).map_err(|e| Error::Invalid(format!("invalid JSON feed: {e}")))?;
     if value.get("version").and_then(Value::as_str).is_some_and(|v| v.contains("jsonfeed.org")) {
         let feed: JsonFeed = serde_json::from_value(value).map_err(|e| Error::Invalid(e.to_string()))?;
-        let items = feed.items.into_iter().map(|i| NewItem {
-            external_id: i.id, url: i.url, title: i.title, summary: i.summary, content: i.content_html.or(i.content_text),
-            author: i.authors.first().or(i.author.as_ref()).and_then(|a| a.name.clone()),
-            published_at: i.date_published.or(i.date_modified).unwrap_or_else(|| Utc::now().to_rfc3339()), tags: i.tags,
-            raw: None, visibility: "public".into(),
+        let items = feed.items.into_iter().map(|i| {
+            let (published_at, date_source) = dated(i.date_published, i.date_modified);
+            NewItem {
+                external_id: i.id, url: i.url, title: i.title, summary: i.summary, content: i.content_html.or(i.content_text),
+                author: i.authors.first().or(i.author.as_ref()).and_then(|a| a.name.clone()),
+                published_at, date_source, tags: i.tags,
+                raw: None, visibility: "public".into(),
+            }
         }).collect();
         return Ok((feed.title, items));
     }
@@ -223,9 +235,10 @@ fn parse_activitypub(value: Value, base: &Url) -> Result<(Option<String>, Vec<Ne
         let id = string_field(object, "id").or_else(|| string_field(object, "url")).unwrap_or_else(|| base.to_string());
         let actor = object.get("attributedTo").and_then(|v| v.as_str()).or_else(|| activity.get("actor").and_then(Value::as_str)).map(str::to_owned);
         let tags = object.get("tag").and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.get("name").and_then(Value::as_str).map(str::to_owned)).collect();
+        let (published_at, date_source) = dated(string_field(object, "published"), string_field(object, "updated"));
         items.push(NewItem { external_id: id, url: string_field(object, "url"), title: string_field(object, "name"), summary: string_field(object, "summary"),
             content: string_field(object, "content"), author: actor,
-            published_at: string_field(object, "published").or_else(|| string_field(object, "updated")).unwrap_or_else(|| Utc::now().to_rfc3339()),
+            published_at, date_source,
             tags, raw: Some(activity), visibility: "public".into() });
     }
     Ok((title, items))

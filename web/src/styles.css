@@ -80,7 +80,7 @@ button.tag:hover { color: var(--text); border-color: #3f3f46; }
 .kicker { margin: 0 0 10px; font-size: 11.5px; color: var(--faint); }
 .linklike { color: var(--faint); }
 .linklike:hover { color: var(--text); }
-.article-head h1 { margin: 0 0 10px; font-size: 25px; font-weight: 700; line-height: 1.25; text-transform: lowercase; overflow-wrap: anywhere; }
+.article-head h1 { margin: 0 0 10px; font-size: 25px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
 .article-meta { margin: 0 0 24px; font-size: 11.5px; color: var(--faint); display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
 .article-body { font-size: 17.5px; line-height: 1.78; color: var(--text-soft); white-space: pre-wrap; overflow-wrap: break-word; }
 .ai-note { margin: 16px 0 0; font-size: 11.5px; color: var(--faint); }
@@ -97,3 +97,18 @@ button.tag:hover { color: var(--text); border-color: #3f3f46; }
 .digest-items li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--line); }
 .digest-items a { font-size: 13.5px; }
 .digest-items .meta { font-size: 11px; color: var(--faint); white-space: nowrap; }
+
+/* List rows pair the selectable row with a bookmark star, so the star is a
+   sibling button rather than nested inside the row's own button. */
+.item-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.star { padding: 7px 10px 0 0; font-size: 13px; line-height: 1; color: var(--faint); }
+.star:hover { color: var(--text); }
+.star.on { color: #d8a657; }
+
+/* Related items under the article body. */
+.related { margin-top: 32px; border-top: 1px solid var(--line); padding-top: 14px; }
+.related ul { list-style: none; margin: 0; padding: 0; }
+.related-item { display: grid; width: 100%; text-align: left; padding: 6px 0; }
+.related-title { font-size: 13.5px; line-height: 1.4; color: var(--text-soft); }
+.related-item:hover .related-title { color: var(--text); }
+.related-source { font-size: 11px; color: var(--faint); }

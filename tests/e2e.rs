@@ -115,7 +115,7 @@ async fn source_to_feed_to_publishing_outputs_works_end_to_end() {
     state.store.upsert_item(Some(&source.id), &NewItem {
         external_id: "article-1".into(), url: Some("https://example.com/article-1".into()), title: Some("Rust feeds that cooperate".into()),
         summary: Some("A complete aggregation path".into()), content: Some("SQLite and peer caches".into()), author: Some("Sidefeed".into()),
-        published_at: "2026-09-20T12:00:00Z".into(), tags: vec!["rust".into()], raw: None, visibility: "public".into(),
+        published_at: "2026-09-20T12:00:00Z".into(), date_source: "published".into(), tags: vec!["rust".into()], raw: None, visibility: "public".into(),
     }).await.unwrap();
 
     let items = app.clone().oneshot(request("GET", "/api/v1/feeds/daily/items", None, false)).await.unwrap();
@@ -196,7 +196,7 @@ async fn enrichment_stores_tags_and_summaries_and_serves_them() {
         title: Some("Bindingless rendering with a compact descriptor".into()),
         summary: Some("A descriptor layout keeps the pipeline simple".into()),
         content: Some("Descriptors keep pipelines coherent. The descriptor index stays compact, and the descriptor table is what the shader reads. Compact descriptors reduce bandwidth, and the pipeline stays coherent because the descriptor layout is stable.".into()),
-        author: Some("Someone".into()), published_at: "2026-10-04T10:00:00Z".into(),
+        author: Some("Someone".into()), published_at: "2026-10-04T10:00:00Z".into(), date_source: "published".into(),
         tags: vec![], raw: None, visibility: "public".into(),
     }).await.unwrap();
 
@@ -232,4 +232,100 @@ async fn enrichment_cache_never_grows_past_its_cap() {
         state.atoms.put(&format!("item-{index}"), sidefeed::model::Atoms { tags: vec!["x".into()], summary: None }, cap).await;
     }
     assert!(state.atoms.len().await <= cap, "cache held {} entries for a cap of {cap}", state.atoms.len().await);
+}
+
+#[tokio::test]
+async fn undated_items_keep_their_first_seen_stamp_through_a_repoll() {
+    let (_app, state, _directory) = fixture().await;
+    let source = state.store.create_source("https://example.com/news.xml", "rss", None).await.unwrap();
+    let undated = NewItem {
+        external_id: "u-1".into(), url: Some("https://example.com/u-1".into()), title: Some("No date".into()),
+        summary: None, content: None, author: None, published_at: "2026-10-04T10:00:00Z".into(),
+        date_source: "fetched".into(), tags: vec![], raw: None, visibility: "public".into(),
+    };
+    let first = state.store.upsert_item(Some(&source.id), &undated).await.unwrap();
+    assert_eq!(first.date_source, "fetched");
+
+    // A later poll supplies a fresh fetch time. The stamp must not move, or an
+    // undated back-catalogue item would resurface as the newest on every poll.
+    let again = NewItem { published_at: "2026-10-05T10:00:00Z".into(), ..undated.clone() };
+    let second = state.store.upsert_item(Some(&source.id), &again).await.unwrap();
+    assert_eq!(first.published_at, second.published_at, "an undated item keeps its first-seen stamp");
+
+    // A date the feed finally provides does replace the fetch stamp.
+    let dated = NewItem { published_at: "2013-02-01T00:00:00Z".into(), date_source: "published".into(), ..undated.clone() };
+    let third = state.store.upsert_item(Some(&source.id), &dated).await.unwrap();
+    assert_eq!(third.date_source, "published");
+    assert_eq!(third.published_at, "2013-02-01T00:00:00Z");
+}
+
+#[tokio::test]
+async fn bookmarks_are_token_free_and_similar_items_rank_the_closest_sibling() {
+    let (app, state, _directory) = fixture_with_enrichment().await;
+    let source = state.store.create_source("https://example.com/gfx.xml", "rss", Some("Graphics")).await.unwrap();
+    app.clone().oneshot(request("POST", "/api/v1/feeds", Some(json!({"slug":"gfx","title":"Graphics","public":true})), true)).await.unwrap();
+    app.clone().oneshot(request("POST", &format!("/api/v1/feeds/gfx/sources/{}", source.id), None, true)).await.unwrap();
+
+    let articles = [
+        ("Bézier curve evaluation on the GPU", "A texture lookup approach to curve evaluation on the GPU."),
+        ("Bézier surfaces on the GPU", "A follow-up about Bézier surface evaluation on the GPU."),
+        ("Unrelated bread baking", "Flour, water, ovens, and patience."),
+    ];
+    let mut ids = Vec::new();
+    for (index, (title, body)) in articles.iter().enumerate() {
+        let item = state.store.upsert_item(Some(&source.id), &NewItem {
+            external_id: format!("gfx-{index}"), url: Some(format!("https://example.com/gfx/{index}")),
+            title: Some((*title).into()), summary: Some((*body).into()), content: Some((*body).into()),
+            author: None, published_at: format!("2026-10-0{}T10:00:00Z", index + 1), date_source: "published".into(),
+            tags: vec![], raw: None, visibility: "public".into(),
+        }).await.unwrap();
+        ids.push(item.id);
+    }
+    sidefeed::enrich::enrich_batch(&state).await.unwrap();
+
+    // Bookmarking is a public read-path write: no token, and it shows up saved.
+    let marked = app.clone().oneshot(request("POST", &format!("/api/v1/items/{}/bookmark", ids[0]), None, false)).await.unwrap();
+    assert_eq!(marked.status(), StatusCode::NO_CONTENT);
+    let saved = app.clone().oneshot(request("GET", "/api/v1/bookmarks", None, false)).await.unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved = json_body(saved).await;
+    assert_eq!(saved.as_array().unwrap().len(), 1);
+    assert_eq!(saved[0]["id"], ids[0]);
+
+    // Similar items blend source, tags, host and keywords; the sibling that
+    // shares all of them leads, and the unrelated item does not.
+    let similar = app.clone().oneshot(request("GET", &format!("/api/v1/items/{}/similar?limit=5", ids[0]), None, false)).await.unwrap();
+    assert_eq!(similar.status(), StatusCode::OK);
+    let similar = json_body(similar).await;
+    let found = similar.as_array().unwrap();
+    assert!(!found.is_empty(), "a sibling item should be related");
+    assert_eq!(found[0]["id"], ids[1], "the closest sibling ranks first");
+    assert!(found.iter().all(|row| row["id"] != ids[0]), "the item is never related to itself");
+
+    // Removing the bookmark takes it out of the saved list again.
+    let removed = app.clone().oneshot(request("DELETE", &format!("/api/v1/items/{}/bookmark", ids[0]), None, false)).await.unwrap();
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    let saved = app.oneshot(request("GET", "/api/v1/bookmarks", None, false)).await.unwrap();
+    assert!(json_body(saved).await.as_array().unwrap().is_empty(), "the saved list is empty after removal");
+}
+
+#[tokio::test]
+async fn a_rewritten_item_link_updates_in_place_instead_of_violating_the_unique_index() {
+    let (_app, state, _directory) = fixture().await;
+    let source = state.store.create_source("https://example.com/feed.xml", "rss", None).await.unwrap();
+    let first = NewItem {
+        external_id: "post-1".into(), url: Some("https://example.com/old".into()), title: Some("First".into()),
+        summary: None, content: None, author: None, published_at: "2026-10-01T00:00:00Z".into(),
+        date_source: "published".into(), tags: vec![], raw: None, visibility: "public".into(),
+    };
+    let stored = state.store.upsert_item(Some(&source.id), &first).await.unwrap();
+
+    // The same (source, external_id) now arrives under a different link, so the
+    // URL-derived id changes. It must update the existing row; an insert would
+    // trip the (source_id, external_id) unique index and drop the item.
+    let rewritten = NewItem { url: Some("https://example.com/new".into()), title: Some("Rewritten".into()), ..first.clone() };
+    let updated = state.store.upsert_item(Some(&source.id), &rewritten).await.unwrap();
+    assert_eq!(updated.id, stored.id, "the row keeps its id");
+    assert_eq!(updated.url.as_deref(), Some("https://example.com/new"));
+    assert_eq!(updated.title.as_deref(), Some("Rewritten"));
 }

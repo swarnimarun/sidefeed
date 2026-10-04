@@ -1,7 +1,9 @@
 import { A, Route, Router, useNavigate, useParams, useSearchParams } from '@solidjs/router';
-import { For, Show, createEffect, createResource, createSignal, onCleanup, type JSX } from 'solid-js';
-import { filterQuery, feeds, feedItems, hostOf, recent, safeUrl, search, type Filters as ApiFilters, type Item } from './api';
-import { filtersFromParams, isPinned, isRead, markRead, paramsFromFilters, pins, togglePin, type Filters } from './state';
+import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
+import { filterQuery, feeds, feedItems, hostOf, recent, safeUrl, savedItems, search, type Filters as ApiFilters, type Item } from './api';
+import { bookmarks, filtersFromParams, isBookmarked, isPinned, isRead, markRead, paramsFromFilters, pins, syncBookmarks, toggleBookmark, type Filters } from './state';
+import { decodeEntities, summaryLine } from './text';
+import { rowDate } from './time';
 import { UpdatesView } from './views/Updates';
 import { ArticlePane } from './views/Article';
 import { FilterBar } from './views/Filters';
@@ -21,7 +23,7 @@ function RecentsView() {
         <FilterBar filters={filters()} onChange={(next) => setParams(Object.fromEntries(new URLSearchParams(paramsFromFilters(next))))} showWindow />
         <ItemList items={withUnread(items() ?? [], filters().unreadOnly)} selected={(item) => item.id === selected()?.id} onSelect={setSelected} />
       </section>
-      <ArticlePane item={selected()} onTag={() => undefined} onHost={() => undefined} />
+      <ArticlePane item={selected()} onTag={() => undefined} onHost={() => undefined} onSelect={setSelected} />
     </div>
   );
 }
@@ -48,6 +50,7 @@ function FeedView() {
         }}
         onHost={(host) => setQuery(Object.fromEntries(new URLSearchParams(paramsFromFilters({ ...filters(), host }))))}
         onCategory={() => navigate(`/${params.slug}`)}
+        onSelect={setSelected}
       />
     </div>
   );
@@ -84,7 +87,33 @@ function SearchView() {
         </div>
         <ItemList items={withUnread(items() ?? [], false)} selected={(item) => item.id === selected()?.id} onSelect={setSelected} />
       </section>
-      <ArticlePane item={selected()} onTag={() => undefined} onHost={() => undefined} />
+      <ArticlePane item={selected()} onTag={() => undefined} onHost={() => undefined} onSelect={setSelected} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- saved
+function SavedView() {
+  const [items, { refetch }] = createResource(savedItems);
+  const [selected, setSelected] = createSignal<Item | undefined>();
+  // Any star toggles the shared set, so the list follows the service rather
+  // than the copy this resource fetched when it mounted.
+  let primed = false;
+  createEffect(() => {
+    bookmarks();
+    if (primed) void refetch();
+    primed = true;
+  });
+  return (
+    <div class="split">
+      <section class="list">
+        <div class="filterbar">
+          <span class="side-label">saved</span>
+          <span class="count">{items()?.length ?? 0}</span>
+        </div>
+        <ItemList items={items() ?? []} showFeed selected={(item) => item.id === selected()?.id} onSelect={setSelected} />
+      </section>
+      <ArticlePane item={selected()} onTag={() => undefined} onHost={() => undefined} onSelect={setSelected} />
     </div>
   );
 }
@@ -95,7 +124,7 @@ function ItemList(props: { items: Item[]; selected: (item: Item) => boolean; onS
     <ol class="items">
       <For each={props.items} fallback={<li class="note">Nothing here.</li>}>
         {(item) => (
-          <li>
+          <li class="item-row">
             <button
               type="button"
               class={`row${props.selected(item) ? ' active' : ''}`}
@@ -107,14 +136,23 @@ function ItemList(props: { items: Item[]; selected: (item: Item) => boolean; onS
             >
               <span class="row-title">
                 <Show when={props.showFeed && (item.feed_title || item.feed)}>
-                  <span class="row-source">{item.feed_title || item.feed} </span>
+                  <span class="row-source">{decodeEntities(item.feed_title || item.feed)} </span>
                 </Show>
-                {item.title || 'Untitled'}
+                {decodeEntities(item.title) || 'Untitled'}
               </span>
-              <time>{new Date(item.published_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
-              <Show when={item.summary || item.ai_summary}>
-                <span class="row-summary">{item.summary || item.ai_summary}</span>
+              <time>{rowDate(item)}</time>
+              <Show when={summaryLine(item.ai_summary || item.summary)}>
+                <span class="row-summary">{summaryLine(item.ai_summary || item.summary)}</span>
               </Show>
+            </button>
+            <button
+              type="button"
+              class={`star${isBookmarked(item.id) ? ' on' : ''}`}
+              title={isBookmarked(item.id) ? 'remove bookmark' : 'bookmark'}
+              aria-label={isBookmarked(item.id) ? 'remove bookmark' : 'bookmark'}
+              onClick={() => void toggleBookmark(item.id)}
+            >
+              {isBookmarked(item.id) ? '\u2605' : '\u2606'}
             </button>
           </li>
         )}
@@ -131,6 +169,7 @@ function Sidebar() {
         <li><A href="/recents" activeClass="active">recents</A></li>
         <li><A href="/updates" activeClass="active">updates</A></li>
         <li><A href="/search" activeClass="active">search</A></li>
+        <li><A href="/saved" activeClass="active">saved</A></li>
       </ul>
       <Show when={pins().length}>
         <p class="side-label">pinned</p>
@@ -173,12 +212,14 @@ function Layout(props: { children?: JSX.Element }) {
 }
 
 export default function App() {
+  onMount(() => void syncBookmarks());
   return (
     <Router root={Layout}>
       <Route path="/" component={RecentsView} />
       <Route path="/recents" component={RecentsView} />
       <Route path="/updates" component={UpdatesView} />
       <Route path="/search" component={SearchView} />
+      <Route path="/saved" component={SavedView} />
       <Route path="/:slug" component={FeedView} />
     </Router>
   );

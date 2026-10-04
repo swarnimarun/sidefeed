@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
 use std::{collections::HashMap, str::FromStr};
 use uuid::Uuid;
-use crate::{error::{Error, Result}, model::{Atoms, Feed, Item, ItemWithFeed, NewItem, Peer, Source}};
+use crate::{error::{Error, Result}, model::{Atoms, Feed, Item, ItemWithFeed, NewItem, Peer, SavedItem, Source}};
 
 #[derive(Clone)]
 pub struct Store { pool: SqlitePool }
@@ -74,12 +74,23 @@ impl Store {
 
     pub async fn upsert_item(&self, source_id: Option<&str>, item: &NewItem) -> Result<Item> {
         let stable = item.url.clone().unwrap_or_else(|| format!("{}:{}", source_id.unwrap_or("peer"), item.external_id));
-        let id = Uuid::new_v5(&Uuid::NAMESPACE_URL, stable.as_bytes()).to_string();
+        let derived = Uuid::new_v5(&Uuid::NAMESPACE_URL, stable.as_bytes()).to_string();
+        // A feed can rewrite an item's link, which changes the URL-derived id
+        // while the (source, external_id) pair stays the same. Reuse the row
+        // that already owns that pair, or the insert trips the unique index and
+        // the item is dropped. Peer items keep their URL-derived id because a
+        // NULL source makes (source_id, external_id) non-unique by design.
+        let existing: Option<String> = match source_id {
+            Some(_) => sqlx::query_scalar("SELECT id FROM items WHERE source_id=? AND external_id=?")
+                .bind(source_id).bind(&item.external_id).fetch_optional(&self.pool).await?,
+            None => None,
+        };
+        let id = existing.unwrap_or(derived);
         let tags = serde_json::to_string(&item.tags).map_err(|e| Error::Invalid(e.to_string()))?;
         let raw = item.raw.as_ref().map(ToString::to_string);
-        sqlx::query("INSERT INTO items(id,source_id,external_id,url,title,summary,content,author,published_at,fetched_at,tags_json,raw_json,visibility) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET url=excluded.url,title=excluded.title,summary=excluded.summary,content=excluded.content,author=excluded.author,published_at=excluded.published_at,fetched_at=excluded.fetched_at,tags_json=excluded.tags_json,raw_json=excluded.raw_json,visibility=excluded.visibility")
+        sqlx::query("INSERT INTO items(id,source_id,external_id,url,title,summary,content,author,published_at,date_source,fetched_at,tags_json,raw_json,visibility) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET url=excluded.url,title=excluded.title,summary=excluded.summary,content=excluded.content,author=excluded.author,published_at=CASE WHEN excluded.date_source='fetched' THEN items.published_at WHEN items.date_source='published' THEN items.published_at ELSE excluded.published_at END,date_source=CASE WHEN excluded.date_source='fetched' THEN items.date_source WHEN items.date_source='published' THEN items.date_source ELSE excluded.date_source END,fetched_at=excluded.fetched_at,tags_json=excluded.tags_json,raw_json=excluded.raw_json,visibility=excluded.visibility")
             .bind(&id).bind(source_id).bind(&item.external_id).bind(&item.url).bind(&item.title).bind(&item.summary)
-            .bind(&item.content).bind(&item.author).bind(&item.published_at).bind(Utc::now().to_rfc3339())
+            .bind(&item.content).bind(&item.author).bind(&item.published_at).bind(&item.date_source).bind(Utc::now().to_rfc3339())
             .bind(tags).bind(raw).bind(&item.visibility).execute(&self.pool).await?;
         self.item(&id).await
     }
@@ -263,6 +274,70 @@ impl Store {
         Ok(count > 0 && matches_filter(&feed, item))
     }
 
+    // ---------------------------------------------------------------- bookmarks
+
+    /// Save an item. The reader is token-free, so the only guard is a total cap:
+    /// enough for a personal list, small enough that a public node cannot be
+    /// filled through this route.
+    pub async fn bookmark(&self, item_id: &str, cap: i64) -> Result<()> {
+        self.item(item_id).await?;
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookmarks WHERE item_id=?").bind(item_id).fetch_one(&self.pool).await?;
+        if exists == 0 {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookmarks").fetch_one(&self.pool).await?;
+            if count >= cap { return Err(Error::Conflict("bookmark limit reached".into())); }
+        }
+        sqlx::query("INSERT OR IGNORE INTO bookmarks(item_id,created_at) VALUES(?,?)")
+            .bind(item_id).bind(Utc::now().to_rfc3339()).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn unbookmark(&self, item_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM bookmarks WHERE item_id=?").bind(item_id).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Every saved item, newest save first, with the feed it came from and when
+    /// it was saved. One row per item even when several feeds carry it.
+    pub async fn saved_items(&self, limit: u32) -> Result<Vec<SavedItem>> {
+        Ok(sqlx::query_as("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title, b.created_at AS saved_at FROM bookmarks b JOIN items i ON i.id=b.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id GROUP BY i.id ORDER BY b.created_at DESC LIMIT ?")
+            .bind(limit).fetch_all(&self.pool).await?)
+    }
+
+    // ---------------------------------------------------------------- similarity
+
+    /// Items that share derived tags with the one being read, most overlap
+    /// first. The overlap count is returned so the caller can weight it.
+    pub async fn similar_by_tags(&self, item_id: &str, model: &str, tags: &[String], limit: u32) -> Result<Vec<(i64, ItemWithFeed)>> {
+        if tags.is_empty() { return Ok(Vec::new()); }
+        let placeholders = vec!["?"; tags.len()].join(",");
+        let sql = format!("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title, COUNT(*) AS overlap FROM item_tags t JOIN items i ON i.id=t.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE t.model=? AND t.tag IN ({placeholders}) AND i.id<>? AND f.public=1 AND i.visibility='public' GROUP BY i.id ORDER BY overlap DESC, i.published_at DESC LIMIT ?");
+        let mut query = sqlx::query_as::<_, TagMatch>(&sql).bind(model);
+        for tag in tags { query = query.bind(tag); }
+        let rows: Vec<TagMatch> = query.bind(item_id).bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|row| (row.overlap, row.item)).collect())
+    }
+
+    /// Other items from the same source, which is the strongest signal that two
+    /// items belong together.
+    pub async fn similar_by_source(&self, source_id: &str, item_id: &str, limit: u32) -> Result<Vec<ItemWithFeed>> {
+        Ok(sqlx::query_as("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE i.source_id=? AND i.id<>? AND f.public=1 AND i.visibility='public' GROUP BY i.id ORDER BY i.published_at DESC LIMIT ?")
+            .bind(source_id).bind(item_id).bind(limit).fetch_all(&self.pool).await?)
+    }
+
+    /// Other items linking to the same host — "more from this site", without the
+    /// exact-host filter the reader already exposes as a link.
+    pub async fn similar_by_host(&self, host: &str, item_id: &str, limit: u32) -> Result<Vec<ItemWithFeed>> {
+        Ok(sqlx::query_as("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE i.url LIKE ? AND i.id<>? AND f.public=1 AND i.visibility='public' GROUP BY i.id ORDER BY i.published_at DESC LIMIT ?")
+            .bind(host_pattern(host)).bind(item_id).bind(limit).fetch_all(&self.pool).await?)
+    }
+
+    /// Items whose text matches the keywords of the item being read. The FTS
+    /// scan is bounded so a broad keyword list cannot page the whole archive.
+    pub async fn similar_by_terms(&self, query: &str, item_id: &str, limit: u32) -> Result<Vec<ItemWithFeed>> {
+        Ok(sqlx::query_as("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM (SELECT item_id FROM items_fts WHERE items_fts MATCH ? LIMIT 200) fts JOIN items i ON i.id=fts.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE i.id<>? AND f.public=1 AND i.visibility='public' GROUP BY i.id ORDER BY i.published_at DESC LIMIT ?")
+            .bind(query).bind(item_id).bind(limit).fetch_all(&self.pool).await?)
+    }
+
     pub async fn public_items_since(&self, since: &str, limit: u32) -> Result<Vec<Item>> {
         Ok(sqlx::query_as("SELECT * FROM items WHERE visibility='public' AND fetched_at>? ORDER BY fetched_at ASC LIMIT ?")
             .bind(since).bind(limit).fetch_all(&self.pool).await?)
@@ -314,6 +389,10 @@ fn append_tag_clause(sql: &mut String, tags: &[String], all: bool) {
         sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM item_tags t WHERE t.item_id=i.id AND t.tag IN ({placeholders}))"));
     }
 }
+
+/// One row of a tag-overlap query: an item and how many tags it shares.
+#[derive(sqlx::FromRow)]
+struct TagMatch { #[sqlx(flatten)] item: ItemWithFeed, overlap: i64 }
 
 fn matches_filter(feed: &Feed, item: &Item) -> bool {
     let haystack = format!("{} {} {} {}", item.title.as_deref().unwrap_or(""), item.summary.as_deref().unwrap_or(""), item.content.as_deref().unwrap_or(""), item.tags_json).to_lowercase();

@@ -2,6 +2,7 @@ import { A, useSearchParams } from '@solidjs/router';
 import { For, Show, createResource } from 'solid-js';
 import { updates } from '../api';
 import { isPinned, togglePin } from '../state';
+import { decodeEntities } from '../text';
 
 /// The digest page: per-category summaries of what moved, with the items worth
 /// opening, and pinned categories first.
@@ -26,7 +27,7 @@ export function UpdatesView() {
               {(category) => (
                 <section class="digest-block">
                   <header>
-                    <A class="digest-cat" href={`/${category.feed}`}>{category.title}</A>
+                    <A class="digest-cat" href={`/${category.feed}`}>{decodeEntities(category.title)}</A>
                     <span class="count">{category.count}</span>
                     <button type="button" class={`opt${isPinned(category.feed) ? ' on' : ''}`} onClick={() => togglePin(category.feed)}>
                       {isPinned(category.feed) ? 'unpin' : 'pin'}
@@ -39,8 +40,8 @@ export function UpdatesView() {
                     <For each={category.items}>
                       {(item) => (
                         <li>
-                          <Show when={item.url} fallback={<span>{item.title}</span>}>
-                            <a href={item.url ?? '#'} target="_blank" rel="noopener noreferrer">{item.title}</a>
+                          <Show when={item.url} fallback={<span>{decodeEntities(item.title)}</span>}>
+                            <a href={item.url ?? '#'} target="_blank" rel="noopener noreferrer">{decodeEntities(item.title)}</a>
                           </Show>
                           <span class="meta">
                             {new Date(item.published_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}

@@ -38,11 +38,23 @@
             <td>Public read</td>
             <td>
               <code>GET /api/v1/public/feeds</code><br>
+              <code>GET /api/v1/recent</code><br>
+              <code>GET /api/v1/search</code><br>
+              <code>GET /api/v1/tags</code><br>
               <code>GET /api/v1/feeds/{slug}/items</code><br>
               <code>GET /api/v1/feeds/{slug}/search</code><br>
               <code>GET /api/v1/feeds/{slug}/stream</code>
             </td>
             <td>None for public feeds</td>
+          </tr>
+          <tr>
+            <td>Reader</td>
+            <td>
+              <code>GET /api/v1/bookmarks</code><br>
+              <code>POST/DELETE /api/v1/items/{id}/bookmark</code><br>
+              <code>GET /api/v1/items/{id}/similar</code>
+            </td>
+            <td>None (single-user saved list)</td>
           </tr>
           <tr>
             <td>Publishing</td>

@@ -8,6 +8,9 @@ export type Item = {
   summary?: string | null;
   content?: string | null;
   published_at: string;
+  /// published | updated | fetched: where published_at came from, so the UI can
+  /// label a fetch timestamp instead of showing it as the post date.
+  date_source?: string | null;
   feed?: string;
   feed_title?: string;
   tags?: string[];
@@ -15,6 +18,7 @@ export type Item = {
 };
 
 export type Feed = { slug: string; title: string; description?: string | null };
+export type SavedItem = Item & { feed: string; feed_title: string; saved_at: string };
 export type TagCount = { tag: string; count: number };
 export type DigestItem = { title: string; url?: string | null; published_at: string; tags: string[] };
 export type Category = { feed: string; title: string; count: number; summary?: string | null; items: DigestItem[] };
@@ -38,6 +42,21 @@ export const search = (query: string, filters = '') =>
   get<Item[]>(`/api/v1/search?q=${encodeURIComponent(query)}&limit=60${filters}`);
 export const feedItems = (slug: string, filters = '') =>
   get<Page<Item>>(`/api/v1/feeds/${encodeURIComponent(slug)}/items?limit=60${filters}`);
+
+/// Saved items and the two mutations behind the reader's bookmark toggle. The
+/// service is the source of truth; the UI stores only the resulting id set.
+/// Writes are token-free by design (single-user reader), so a failure here is
+/// surfaced by rolling the optimistic toggle back in `state.ts`.
+export const savedItems = () => get<SavedItem[]>('/api/v1/bookmarks');
+export const similarItems = (id: string, limit = 6) =>
+  get<Item[]>(`/api/v1/items/${encodeURIComponent(id)}/similar?limit=${limit}`);
+
+async function write(method: 'POST' | 'DELETE', path: string): Promise<void> {
+  const response = await fetch(path, { method });
+  if (!response.ok) throw new ApiError(`${response.status} ${response.statusText}`);
+}
+export const addBookmark = (id: string) => write('POST', `/api/v1/items/${encodeURIComponent(id)}/bookmark`);
+export const removeBookmark = (id: string) => write('DELETE', `/api/v1/items/${encodeURIComponent(id)}/bookmark`);
 
 /// Mirrors the server's filter vocabulary, so every view builds its query the
 /// same way and a new filter is one line here.

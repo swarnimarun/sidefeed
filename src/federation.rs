@@ -56,7 +56,7 @@ async fn sync_one(state:&AppState,peer:&Peer)->Result<usize>{
     while let Some(chunk)=body.next().await{let chunk=chunk?;if bytes.len()+chunk.len()>state.config.max_response_bytes{return Err(Error::Invalid("peer response is too large".into()));}bytes.extend_from_slice(&chunk);}
     let items:Vec<Item>=serde_json::from_slice(&bytes).map_err(|e|Error::Invalid(format!("invalid peer response: {e}")))?;
     let mut merged=0;
-    for item in items {let candidate=NewItem{external_id:item.external_id,url:item.url,title:item.title,summary:item.summary,content:item.content,author:item.author,published_at:item.published_at,tags:serde_json::from_str(&item.tags_json).unwrap_or_default(),raw:item.raw_json.and_then(|v|serde_json::from_str(&v).ok()),visibility:item.visibility};let stored=state.store.upsert_item(None,&candidate).await?;let _=state.events.send(stored);merged+=1;}
+    for item in items {let candidate=NewItem{external_id:item.external_id,url:item.url,title:item.title,summary:item.summary,content:item.content,author:item.author,published_at:item.published_at,date_source:item.date_source,tags:serde_json::from_str(&item.tags_json).unwrap_or_default(),raw:item.raw_json.and_then(|v|serde_json::from_str(&v).ok()),visibility:item.visibility};let stored=state.store.upsert_item(None,&candidate).await?;let _=state.events.send(stored);merged+=1;}
     state.store.touch_peer(&peer.id).await?;Ok(merged)
 }
 

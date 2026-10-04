@@ -98,6 +98,13 @@ fn terms(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Title words worth matching against, for the reader's "similar items".
+/// Longer than a tag: a three-letter word matches too much when the only
+/// context is one title.
+pub fn keywords(text: &str) -> Vec<String> {
+    terms(&text.to_lowercase()).into_iter().filter(|word| word.len() >= 4).take(8).collect()
+}
+
 /// Bodies that are only a link label say nothing, and would otherwise turn into
 /// tags ("comments") or fake sentences.
 const LINK_ONLY: [&str; 6] = ["comments", "comment", "read more", "continue reading", "permalink", "link"];

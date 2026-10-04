@@ -19,11 +19,18 @@ docker compose up --build
 For a native build, install stable Rust and run `cargo run`. The default listen
 address is `0.0.0.0:8080`; data is stored in `sidefeed.db`.
 
-Open `http://localhost:8080/` for the reader: a read-only, unauthenticated
-view of every feed marked `public`. It never asks for a token and cannot create
-or change anything — adding sources and feeds goes through the API below, with
-reference documentation at `/docs` and an OpenAPI 3.1 document at
+Open `http://localhost:8080/` for the reader: an unauthenticated view of every
+feed marked `public`. It never asks for a token. Its only writes are bookmarks
+and on-demand summaries, so adding sources and feeds still goes through the API
+below, with reference documentation at `/docs` and an OpenAPI 3.1 document at
 `/openapi.json`.
+
+The reader can bookmark an item from a list row or the article header; saved
+items live on the node and appear under `/saved`. `GET /api/v1/bookmarks`
+returns them and `POST`/`DELETE /api/v1/items/{id}/bookmark` toggles one. A
+related-reading list under each article comes from
+`GET /api/v1/items/{id}/similar`, which blends the same source, the same link
+host, shared derived tags, and shared title keywords.
 
 The reader is compiled into the Sidefeed binary, so there is no separate asset
 server. Point `SIDEFEED_WEB_DIR` at a directory to override `index.html`,

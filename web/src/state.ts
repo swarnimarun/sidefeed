@@ -1,4 +1,5 @@
 import { createSignal } from 'solid-js';
+import { addBookmark, removeBookmark, savedItems } from './api';
 
 // Small browser-local stores, kept out of components so every view shares them.
 
@@ -10,6 +11,28 @@ export const markRead = (id: string) => {
   readIds.add(id);
   localStorage.setItem(readKey, JSON.stringify([...readIds].slice(-500)));
 };
+
+/// Saved items live on the service, not in localStorage: the list is shared
+/// across a node's devices and survives a browser reset. This signal mirrors the
+/// resulting id set so every star renders without a request per row. Toggles
+/// are optimistic and roll back when the write fails.
+const [bookmarks, setBookmarks] = createSignal<string[]>([]);
+export { bookmarks };
+export const isBookmarked = (id: string) => bookmarks().includes(id);
+let bookmarksLoaded = false;
+export async function syncBookmarks() {
+  if (bookmarksLoaded) return;
+  bookmarksLoaded = true;
+  try { setBookmarks((await savedItems()).map((item) => item.id)); }
+  catch { bookmarksLoaded = false; }
+}
+export async function toggleBookmark(id: string) {
+  const on = isBookmarked(id);
+  const previous = bookmarks();
+  setBookmarks(on ? previous.filter((value) => value !== id) : [id, ...previous]);
+  try { await (on ? removeBookmark(id) : addBookmark(id)); }
+  catch { setBookmarks(previous); }
+}
 
 const pinKey = 'sidefeed-pins';
 const [pins, setPins] = createSignal<string[]>(JSON.parse(localStorage.getItem(pinKey) || '[]') as string[]);

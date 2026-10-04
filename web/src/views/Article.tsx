@@ -1,13 +1,8 @@
-import { For, Show, createMemo, createSignal } from 'solid-js';
-import { hostOf, safeUrl, type Item } from '../api';
-
-const plainText = (value?: string | null) =>
-  String(value ?? '')
-    .replace(/<\s*(br|\/p|\/div|\/li|\/h[1-6])\s*\/?>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+import { For, Show, createMemo, createResource, createSignal } from 'solid-js';
+import { hostOf, safeUrl, similarItems, type Item } from '../api';
+import { isBookmarked, toggleBookmark } from '../state';
+import { decodeEntities, plainText } from '../text';
+import { fullDate } from '../time';
 
 /// Discussion links live in the item body for aggregators; the backend keeps the
 /// item URL pointing at the article, so both can be offered.
@@ -17,13 +12,15 @@ function firstDiscussion(item: Item): string {
   return match ? safeUrl(match[1]) : '';
 }
 
-export function ArticlePane(props: { item?: Item; onTag: (tag: string) => void; onHost: (host: string) => void; onCategory?: () => void }) {
+export function ArticlePane(props: { item?: Item; onTag: (tag: string) => void; onHost: (host: string) => void; onCategory?: () => void; onSelect?: (item: Item) => void }) {
   const [generated, setGenerated] = createSignal<string>('');
   const [generating, setGenerating] = createSignal(false);
   const [error, setError] = createSignal('');
   const article = () => safeUrl(props.item?.url);
   const discussion = createMemo(() => (props.item ? firstDiscussion(props.item) : ''));
   const body = createMemo(() => plainText(props.item?.content || props.item?.summary));
+  // Related items are fetched per article, so switching articles refetches.
+  const [related] = createResource(() => props.item?.id, (id) => (id ? similarItems(id, 6) : Promise.resolve([] as Item[])));
 
   const generate = async () => {
     const item = props.item;
@@ -49,13 +46,20 @@ export function ArticlePane(props: { item?: Item; onTag: (tag: string) => void; 
           <article>
             <header class="article-head">
               <p class="kicker">
-                <Show when={props.onCategory} fallback={<span>{item().feed_title || item().feed}</span>}>
-                  <button type="button" class="linklike" onClick={props.onCategory}>{item().feed_title || item().feed}</button>
+                <Show when={props.onCategory} fallback={<span>{decodeEntities(item().feed_title || item().feed)}</span>}>
+                  <button type="button" class="linklike" onClick={props.onCategory}>{decodeEntities(item().feed_title || item().feed)}</button>
                 </Show>
               </p>
-              <h1>{item().title || 'Untitled'}</h1>
+              <h1>{decodeEntities(item().title) || 'Untitled'}</h1>
               <p class="article-meta">
-                <time>{new Date(item().published_at).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}</time>
+                <time>{fullDate(item())}</time>
+                <button
+                  type="button"
+                  class={`opt${isBookmarked(item().id) ? ' on' : ''}`}
+                  onClick={() => void toggleBookmark(item().id)}
+                >
+                  {isBookmarked(item().id) ? 'saved \u2605' : 'save \u2606'}
+                </button>
                 <Show when={article()}>
                   {' / '}
                   <a href={article()} target="_blank" rel="noopener noreferrer">original</a>
@@ -97,6 +101,23 @@ export function ArticlePane(props: { item?: Item; onTag: (tag: string) => void; 
               <Show when={!body() && (item().ai_summary || generated())}>
                 <p class="ai-note">generated summary</p>
               </Show>
+            </Show>
+            <Show when={related()?.length}>
+              <section class="related">
+                <p class="side-label">similar</p>
+                <ul>
+                  <For each={related()}>
+                    {(row) => (
+                      <li>
+                        <button type="button" class="related-item" onClick={() => props.onSelect?.(row)}>
+                          <span class="related-title">{decodeEntities(row.title) || 'Untitled'}</span>
+                          <span class="related-source">{decodeEntities(row.feed_title || row.feed)}</span>
+                        </button>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </section>
             </Show>
           </article>
         )}
