@@ -54,6 +54,9 @@ async fn poll_source_inner(state: &AppState, source: &Source) -> Result<usize> {
             if let Some(value) = &source.last_modified { request = request.header(IF_MODIFIED_SINCE, value); }
         }
         let current = request.send().await?;
+        // 304 sits inside the 3xx range. A conditional GET answering "unchanged"
+        // is not a redirect and carries no Location header to follow.
+        if current.status() == StatusCode::NOT_MODIFIED { response = Some(current); break; }
         if current.status().is_redirection() {
             let location = current.headers().get(LOCATION).and_then(|v| v.to_str().ok()).ok_or_else(|| Error::Invalid("redirect missing Location".into()))?;
             url = url.join(location).map_err(|e| Error::Invalid(format!("invalid redirect: {e}")))?;
@@ -99,21 +102,89 @@ pub fn parse_document(bytes: &[u8], content_type: &str, base: &Url) -> Result<(O
     if content_type.contains("json") || trimmed == Some(b'{') || trimmed == Some(b'[') { return parse_json(bytes, base); }
     let feed = feed_rs::parser::parse(Cursor::new(bytes)).map_err(|e| Error::Invalid(format!("unsupported feed: {e}")))?;
     let title = feed.title.map(|v| v.content);
-    Ok((title, feed.entries.iter().map(normalize_entry).collect()))
+    // Feeds do ship relative links, and a relative link is useless once it has
+    // left the page it was written for: resolve every item against the feed URL.
+    let items = feed.entries.iter().map(|entry| {
+        let mut item = normalize_entry(entry);
+        item.url = item.url.map(|href| resolve_url(base, &href));
+        item
+    }).collect();
+    Ok((title, items))
+}
+
+fn resolve_url(base: &Url, href: &str) -> String {
+    base.join(href).map(|url| url.to_string()).unwrap_or_else(|_| href.to_string())
 }
 
 fn normalize_entry(entry: &Entry) -> NewItem {
     let published = entry.published.or(entry.updated).map(|v| v.to_rfc3339()).unwrap_or_else(|| Utc::now().to_rfc3339());
+    let body = entry.content.as_ref().and_then(|v| v.body.clone());
+    let summary = entry.summary.as_ref().map(|v| v.content.clone());
     NewItem {
         external_id: if entry.id.is_empty() { entry.links.first().map(|l| l.href.clone()).unwrap_or_else(|| Uuid::new_v4().to_string()) } else { entry.id.clone() },
-        url: entry.links.first().map(|v| v.href.clone()),
+        url: prefer_article(entry.links.first().map(|v| v.href.clone()), body.as_deref().or(summary.as_deref())),
         title: entry.title.as_ref().map(|v| v.content.clone()),
-        summary: entry.summary.as_ref().map(|v| v.content.clone()),
-        content: entry.content.as_ref().and_then(|v| v.body.clone()),
+        summary,
+        content: body,
         author: entry.authors.first().map(|v| v.name.clone()),
         published_at: published,
         tags: entry.categories.iter().map(|v| v.term.clone()).collect(), raw: None, visibility: "public".into(),
     }
+}
+
+// ---------------------------------------------------------------- link cleanup
+//
+// Aggregators post a story and its discussion as two links. Reddit puts the
+// comments page in the item link and the article in the body as a "[link]"
+// anchor, so without this the reader offers the thread as "the original". The
+// body keeps the thread link, which is what the reader shows as "comments".
+
+fn is_discussion(url: &str) -> bool {
+    let lowered = url.to_lowercase();
+    (lowered.contains("reddit.com") && lowered.contains("/comments/"))
+        || lowered.contains("news.ycombinator.com/item")
+        || (lowered.contains("lobste.rs") && lowered.contains("/s/"))
+        || lowered.contains("tildes.net/~")
+}
+
+/// `out.reddit.com/t3_x?url=<target>` wrappers hide where a link really goes.
+fn unwrap_redirect(url: &str) -> String {
+    let Ok(parsed) = Url::parse(url) else { return url.to_string() };
+    if parsed.host_str() != Some("out.reddit.com") { return url.to_string(); }
+    parsed.query_pairs().find(|(key, _)| key == "url").map(|(_, value)| value.into_owned()).unwrap_or_else(|| url.to_string())
+}
+
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    for needle in [format!("{name}=\""), format!("{name}='"), format!("{}=\"", name.to_uppercase())] {
+        if let Some(start) = tag.find(&needle) {
+            let rest = &tag[start + needle.len()..];
+            let quote = if needle.ends_with('\'') { '\'' } else { '"' };
+            if let Some(end) = rest.find(quote) { return Some(rest[..end].to_string()); }
+        }
+    }
+    None
+}
+
+/// The first http(s) link in a body that is not itself a discussion page.
+fn first_article_link(html: &str) -> Option<String> {
+    let mut rest = html;
+    while let Some(position) = rest.find("<a ") {
+        rest = &rest[position + 3..];
+        let end = rest.find('>')?;
+        if let Some(href) = attribute(&rest[..end], "href") {
+            let resolved = unwrap_redirect(&href.replace("&amp;", "&"));
+            if resolved.starts_with("http") && !is_discussion(&resolved) { return Some(resolved); }
+        }
+        rest = &rest[end..];
+    }
+    None
+}
+
+fn prefer_article(url: Option<String>, body: Option<&str>) -> Option<String> {
+    let url = url?;
+    let resolved = unwrap_redirect(&url);
+    if !is_discussion(&resolved) { return Some(resolved); }
+    body.and_then(first_article_link).or(Some(resolved))
 }
 
 #[derive(Deserialize)]
@@ -204,6 +275,34 @@ fn blocked_ip(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reddit_items_point_at_the_article_not_the_thread() {
+        let thread = "https://www.reddit.com/r/rust/comments/abc/title/";
+        let body = "<table><tr><td><a href=\"https://out.reddit.com/t3_abc?url=https%3A%2F%2Fexample.com%2Fpost&amp;token=x\">[link]</a></td>\
+                    <td><a href=\"https://www.reddit.com/r/rust/comments/abc/title/\">[comments]</a></td></tr></table>";
+        assert_eq!(prefer_article(Some(thread.into()), Some(body)).as_deref(), Some("https://example.com/post"));
+    }
+
+    #[test]
+    fn a_thread_without_an_article_keeps_its_own_link() {
+        let thread = "https://news.ycombinator.com/item?id=42";
+        assert_eq!(prefer_article(Some(thread.into()), Some("<a href=\"https://news.ycombinator.com/item?id=42\">Comments</a>")).as_deref(), Some(thread));
+    }
+
+    #[test]
+    fn ordinary_links_and_redirects_are_left_alone() {
+        assert_eq!(prefer_article(Some("https://example.com/post".into()), None).as_deref(), Some("https://example.com/post"));
+        assert_eq!(unwrap_redirect("https://example.com/post"), "https://example.com/post");
+    }
+
+    #[test]
+    fn relative_item_links_resolve_against_the_feed_url() {
+        let base = Url::parse("https://blog.example.com/feed.xml").unwrap();
+        assert_eq!(resolve_url(&base, "/blog/pixel-art"), "https://blog.example.com/blog/pixel-art");
+        assert_eq!(resolve_url(&base, "posts/one"), "https://blog.example.com/posts/one");
+        assert_eq!(resolve_url(&base, "https://other.example.com/x"), "https://other.example.com/x");
+    }
     #[test]
     fn parses_json_feed() {
         let base = Url::parse("https://example.com/feed").unwrap();

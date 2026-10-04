@@ -29,12 +29,22 @@ pub trait Enricher: Send + Sync {
     /// Stable identifier stored alongside every artifact this provider writes.
     fn name(&self) -> &'static str;
     async fn enrich(&self, text: &str) -> Result<Atoms>;
+    /// A short "what is new here" line for a group of items. Generative
+    /// providers override this; extractive ones compose from the sample.
+    async fn digest(&self, label: &str, sample: &str) -> Result<Option<String>> {
+        let _ = label;
+        Ok(heuristic_digest(sample))
+    }
 }
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/feeds/{slug}/tags", get(feed_tags))
         .route("/api/v1/items/{id}/enrich", post(enrich_now))
+        // Reader-facing: a public item can be summarised on demand, without a
+        // token, but only once per model. The artifact is stored, so every later
+        // request is a read and a model is never called twice for one item.
+        .route("/api/v1/feeds/{slug}/items/{item_id}/summarize", post(summarize_now))
 }
 
 // ---------------------------------------------------------------- text helpers
@@ -306,7 +316,106 @@ impl Inner {
     }
 }
 
-// ---------------------------------------------------------------- work
+/// Extractive stand-in for a model-written digest: the best sentence from the
+/// sample, or the leading titles when the sample has no usable prose.
+pub fn heuristic_digest(sample: &str) -> Option<String> {
+    if let Some(summary) = heuristic_atoms(sample).summary { return Some(summary); }
+    let lines: Vec<&str> = sample.lines().map(str::trim).filter(|line| !line.is_empty()).take(3).collect();
+    if lines.is_empty() { return None; }
+    truncate_at_word(&lines.join(" · "), 240)
+}
+
+/// One line per category, plus an overall line, describing what moved in the
+/// window. Cached briefly: a model call per page load would be wasteful.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DigestItem { pub title: String, pub url: Option<String>, pub published_at: String, pub tags: Vec<String> }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CategoryDigest { pub feed: String, pub title: String, pub count: usize, pub summary: Option<String>, pub items: Vec<DigestItem> }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Updates {
+    pub window_hours: u32,
+    pub generated_at: String,
+    pub summary: Option<String>,
+    pub categories: Vec<CategoryDigest>,
+}
+
+/// Holds the most recent digest only, keyed by window. A few hundred bytes, and
+/// rebuilt at most once per TTL.
+#[derive(Default)]
+pub struct UpdatesCache { entry: tokio::sync::Mutex<Option<(std::time::Instant, u32, Updates)>> }
+
+const UPDATES_TTL: Duration = Duration::from_secs(600);
+
+impl UpdatesCache {
+    async fn get(&self, hours: u32) -> Option<Updates> {
+        let guard = self.entry.lock().await;
+        match guard.as_ref() {
+            Some((at, cached_hours, updates)) if *cached_hours == hours && at.elapsed() < UPDATES_TTL => Some(updates.clone()),
+            _ => None,
+        }
+    }
+
+    async fn put(&self, hours: u32, updates: &Updates) {
+        *self.entry.lock().await = Some((std::time::Instant::now(), hours, updates.clone()));
+    }
+}
+
+/// The per-category rollup behind the updates page: how much moved and a short
+/// line about it, grouped by feed, for the items published in the window.
+pub async fn updates(state: &AppState, hours: u32) -> Result<Updates> {
+    if let Some(cached) = state.updates.get(hours).await { return Ok(cached); }
+    let since = (chrono::Utc::now() - chrono::Duration::hours(hours as i64)).to_rfc3339();
+    let rows = state.store.recent_items(&since, 300, &[], false).await?;
+
+    // Rows arrive newest first, so the first appearance of a feed fixes the
+    // category order: the busiest recent category leads.
+    let mut order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, Vec<crate::model::ItemWithFeed>> = HashMap::new();
+    for row in rows {
+        if !grouped.contains_key(&row.feed_slug) { order.push(row.feed_slug.clone()); }
+        grouped.entry(row.feed_slug.clone()).or_default().push(row);
+    }
+
+    let enricher = enricher(state).ok();
+    let mut categories = Vec::new();
+    for slug in order.iter().take(12) {
+        let group = &grouped[slug];
+        let sample = group.iter().take(6).map(|row| {
+            let title = row.item.title.as_deref().unwrap_or("").to_string();
+            let body = plain_text(row.item.summary.as_deref().or(row.item.content.as_deref()).unwrap_or(""));
+            if body.is_empty() { title } else { format!("{title}. {}", truncate_at_word(&body, 160).unwrap_or_default()) }
+        }).collect::<Vec<_>>().join("\n");
+        let summary = match &enricher {
+            Some(found) => found.digest(&group[0].feed_title, &sample).await.unwrap_or(None),
+            None => heuristic_digest(&sample),
+        };
+        // The few items worth opening, so the digest page is readable on its
+        // own without a second round trip per category. Tags are fetched in one
+        // batch rather than per row.
+        let head: Vec<&crate::model::ItemWithFeed> = group.iter().take(5).collect();
+        let ids: Vec<String> = head.iter().map(|row| row.item.id.clone()).collect();
+        let atoms = atoms_for(state, &ids).await.unwrap_or_default();
+        let items = head.iter().map(|row| DigestItem {
+            title: row.item.title.clone().unwrap_or_else(|| "Untitled".into()),
+            url: row.item.url.clone(),
+            published_at: row.item.published_at.clone(),
+            tags: atoms.get(&row.item.id).map(|found| found.tags.clone()).unwrap_or_default(),
+        }).collect();
+        categories.push(CategoryDigest { feed: slug.clone(), title: group[0].feed_title.clone(), count: group.len(), summary, items });
+    }
+
+    let combined = categories.iter().filter_map(|category| category.summary.clone()).collect::<Vec<_>>().join(" ");
+    let summary = match &enricher {
+        Some(found) if !combined.is_empty() => found.digest("everything", &combined).await.unwrap_or(None),
+        _ => heuristic_digest(&combined),
+    };
+
+    let updates = Updates { window_hours: hours, generated_at: chrono::Utc::now().to_rfc3339(), summary, categories };
+    state.updates.put(hours, &updates).await;
+    Ok(updates)
+}
 
 pub fn item_text(item: &Item) -> String {
     let mut parts = vec![item.title.as_deref().unwrap_or("")];
@@ -393,6 +502,19 @@ async fn enrich_now(State(state): State<AppState>, headers: HeaderMap, Path(id):
     let item = state.store.item(&id).await?;
     let atoms = enrich_item(&state, &item).await?;
     Ok((StatusCode::CREATED, Json(atoms)))
+}
+
+async fn summarize_now(State(state): State<AppState>, Path((slug, item_id)): Path<(String, String)>) -> Result<Json<Atoms>> {
+    let headers = HeaderMap::new();
+    access_feed(&state, &headers, &slug).await?;
+    let item = state.store.item(&item_id).await?;
+    if !state.store.item_in_feed(&slug, &item).await? { return Err(Error::NotFound); }
+    let enricher = enricher(&state)?;
+    let existing = state.store.atoms(&item_id, enricher.name()).await?;
+    if existing.summary.is_some() { return Ok(Json(existing)); }
+    let atoms = enrich_item(&state, &item).await?;
+    state.atoms.put(&item_id, atoms.clone(), state.config.enrich.cache_entries).await;
+    Ok(Json(atoms))
 }
 
 #[cfg(test)]

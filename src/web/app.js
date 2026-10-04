@@ -120,7 +120,19 @@ const read = (() => {
 })();
 
 // ---------------------------------------------------------------- state
-const state = { feeds: [], slug: '', items: [], selected: null, stream: null, mode: 'feed', tag: '', hours: 48 };
+const state = {
+  feeds: [], slug: '', items: [], selected: null, stream: null,
+  mode: 'feed',        // feed | recent | search
+  query: '',           // active search text
+  tags: [],            // selected tags, server side filtered
+  matchAll: false,     // every tag instead of any
+  unreadOnly: false,
+  oldest: false,
+  hours: 48,
+};
+
+const currentPath = () => location.pathname.replace(/\/+$/, '') || '/';
+const pushRoute = (path) => { if (location.pathname + location.search !== path) history.pushState({}, '', path); };
 
 // Prefer what the feed shipped; fall back to the generated summary so link-only
 // items, which have no body at all, still say something useful in the list.
@@ -155,14 +167,19 @@ function togglePane(name, force) {
 
 // ---------------------------------------------------------------- render
 function renderFeeds() {
-  const recent = `<li><button type="button" data-recent="1"${state.mode === 'recent' ? ' class="active" aria-current="true"' : ''}>recent</button></li>`;
-  $('#feeds').innerHTML = recent + state.feeds.map((feed) => `
+  const pages = `
+    <li><button type="button" data-page="recents"${state.mode === 'recent' ? ' class="active" aria-current="true"' : ''}>recents</button></li>
+    <li><button type="button" data-page="updates"${state.mode === 'updates' ? ' class="active" aria-current="true"' : ''}>updates</button></li>
+    <li><button type="button" data-page="search"${state.mode === 'search' ? ' class="active" aria-current="true"' : ''}>search</button></li>`;
+  $('#feeds').innerHTML = pages + state.feeds.map((feed) => `
     <li>
       <button type="button" data-slug="${escapeHtml(feed.slug)}"${state.mode === 'feed' && feed.slug === state.slug ? ' class="active" aria-current="true"' : ''}>
         ${escapeHtml(feed.title)}
       </button>
     </li>`).join('');
-  $('#feeds').querySelector('[data-recent]').onclick = () => selectRecent();
+  $('#feeds').querySelector('[data-page="recents"]').onclick = () => selectRecent();
+  $('#feeds').querySelector('[data-page="updates"]').onclick = () => selectUpdates();
+  $('#feeds').querySelector('[data-page="search"]').onclick = () => openSearch();
   for (const button of $$('#feeds button[data-slug]')) button.onclick = () => selectFeed(button.dataset.slug);
 }
 
@@ -223,13 +240,11 @@ function renderArticle(item) {
         ${article ? ` <span class="sep">/</span> <a href="${escapeHtml(article)}" target="_blank" rel="noopener noreferrer">original</a>` : ''}
         ${discussion ? ` <span class="sep">/</span> <a href="${escapeHtml(discussion)}" target="_blank" rel="noopener noreferrer">comments</a>` : ''}
       </p>
-      ${tags.length ? `<p class="tags">${tags.map((tag) => state.mode === 'feed'
-        ? `<button type="button" class="tag" data-tag="${escapeHtml(tag)}" title="filter this feed by tag">${escapeHtml(tag)}</button>`
-        : `<span class="tag static">${escapeHtml(tag)}</span>`).join('')}</p>` : ''}
+  ${tags.length ? `<p class="tags">${tags.map((tag) => `<button type="button" class="tag${state.tags.includes(tag) ? ' on' : ''}" data-tag="${escapeHtml(tag)}" title="filter by ${escapeHtml(tag)}">${escapeHtml(tag)}</button>`).join('')}</p>` : ''}
     </header>
     <div class="article-body">${body ? escapeHtml(body) : (generated ? escapeHtml(generated) : '<p class="note">No body text in the feed.</p>')}</div>
     ${generated ? '<p class="ai-note">generated summary</p>' : ''}`;
-  for (const button of $$('#article .tag[data-tag]')) button.onclick = () => selectTag(button.dataset.tag);
+  for (const button of $$('#article .tag[data-tag]')) button.onclick = () => toggleTag(button.dataset.tag);
 }
 
 async function renderDigest(slug) {
@@ -253,18 +268,154 @@ async function renderDigest(slug) {
 }
 
 function renderFeedLinks() {
-  if (state.mode === 'recent') {
-    $('#feed-links').innerHTML = '<span class="filter-label">last 48 hours</span>';
+  if (state.mode !== 'feed') {
+    $('#feed-links').innerHTML = `<span class="filter-label">${state.mode === 'search' ? 'search' : `last ${state.hours} hours`}</span>`;
     return;
   }
-  const filter = state.tag ? `<button type="button" id="clear-tag" class="tag" title="clear the tag filter">${escapeHtml(state.tag)} ✕</button>` : '';
-  $('#feed-links').innerHTML = `${filter}
+  $('#feed-links').innerHTML = `
     <a href="/feeds/${encodeURIComponent(state.slug)}.rss">rss</a>
     <a href="/feeds/${encodeURIComponent(state.slug)}.json">json</a>
     <button type="button" id="digest">digest</button>`;
   $('#digest').onclick = () => renderDigest(state.slug);
-  const clear = $('#clear-tag');
-  if (clear) clear.onclick = () => selectTag('');
+}
+
+// The tag browser lists what the current view actually contains, so it is the
+// feed's own tags in feed mode and the whole public archive otherwise.
+async function renderTagBrowser() {
+  const block = $('#tag-block');
+  let rows = [];
+  try {
+    if (state.mode === 'feed' && state.slug) {
+      rows = await api(`/api/v1/feeds/${encodeURIComponent(state.slug)}/tags?limit=40`);
+    } else {
+      rows = await api(`/api/v1/tags?hours=${state.hours * 7}&limit=40`);
+    }
+  } catch { rows = []; }
+  block.hidden = rows.length === 0;
+  if (!rows.length) { $('#tags').innerHTML = ''; return; }
+  $('#tags').innerHTML = rows.map((row) => {
+    const active = state.tags.includes(row.tag);
+    return `<button type="button" class="tag${active ? ' on' : ''}" data-tag="${escapeHtml(row.tag)}" title="${active ? 'remove' : 'add'} the ${escapeHtml(row.tag)} filter">${escapeHtml(row.tag)} <span class="count">${row.count}</span></button>`;
+  }).join('');
+  for (const button of $$('#tags .tag')) button.onclick = () => toggleTag(button.dataset.tag);
+}
+
+function renderFilterbar() {
+  const bar = $('#filterbar');
+  const parts = [];
+  if (state.mode === 'recent' || state.mode === 'updates') {
+    parts.push(`<span class="filter-group">window${[24, 48, 168].map((hours) => `<button type="button" class="opt${state.hours === hours ? ' on' : ''}" data-hours="${hours}">${hours === 168 ? '7d' : `${hours}h`}</button>`).join('')}</span>`);
+  }
+  parts.push(`<span class="filter-group">order<button type="button" class="opt${state.oldest ? '' : ' on'}" data-order="newest">newest</button><button type="button" class="opt${state.oldest ? ' on' : ''}" data-order="oldest">oldest</button></span>`);
+  parts.push(`<span class="filter-group"><button type="button" class="opt${state.unreadOnly ? ' on' : ''}" data-unread="1">unread only</button></span>`);
+  if (state.tags.length > 1) {
+    parts.push(`<span class="filter-group">match<button type="button" class="opt${state.matchAll ? '' : ' on'}" data-match="any">any</button><button type="button" class="opt${state.matchAll ? ' on' : ''}" data-match="all">all</button></span>`);
+  }
+  if (state.tags.length) {
+    parts.push(`<span class="filter-group tags">${state.tags.map((tag) => `<button type="button" class="tag on" data-clear="${escapeHtml(tag)}">${escapeHtml(tag)} ✕</button>`).join('')}</span>`);
+  }
+  if (state.tags.length || state.unreadOnly || state.oldest) {
+    parts.push('<button type="button" class="opt reset" data-reset="1">clear</button>');
+  }
+  bar.hidden = parts.length === 0;
+  bar.innerHTML = parts.join('');
+  for (const button of $$('#filterbar [data-hours]')) button.onclick = () => { state.hours = Number(button.dataset.hours); if (state.mode === 'updates') selectUpdates({ push: false }); else loadItems(state.slug, { quiet: true }); renderFilterbar(); renderFeedLinks(); renderTagBrowser(); };
+  for (const button of $$('#filterbar [data-order]')) button.onclick = () => { state.oldest = button.dataset.order === 'oldest'; loadItems(state.slug, { quiet: true }); renderFilterbar(); };
+  for (const button of $$('#filterbar [data-unread]')) button.onclick = () => { state.unreadOnly = !state.unreadOnly; loadItems(state.slug, { quiet: true }); };
+  for (const button of $$('#filterbar [data-match]')) button.onclick = () => { state.matchAll = button.dataset.match === 'all'; loadItems(state.slug, { quiet: true }); renderFilterbar(); };
+  for (const button of $$('#filterbar [data-clear]')) button.onclick = () => toggleTag(button.dataset.clear);
+  const reset = $('#filterbar [data-reset]');
+  if (reset) reset.onclick = () => { state.tags = []; state.unreadOnly = false; state.oldest = false; loadItems(state.slug, { quiet: true }); renderFilterbar(); renderTagBrowser(); };
+}
+
+/// Tags accumulate: each click narrows further, which is what makes the tag
+/// browser usable for "show me the ray tracing papers".
+function toggleTag(tag) {
+  const index = state.tags.indexOf(tag);
+  if (index >= 0) state.tags.splice(index, 1); else state.tags.push(tag);
+  state.selected = null;
+  loadItems(state.slug, { quiet: true });
+  renderFilterbar();
+  renderTagBrowser();
+}
+
+// Pinned categories lead the updates page. Local to this browser, like read state.
+const pins = (() => {
+  const KEY = 'sidefeed-pins';
+  let ids = [];
+  try { ids = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { ids = []; }
+  return {
+    has: (slug) => ids.includes(slug),
+    toggle(slug) {
+      ids = ids.includes(slug) ? ids.filter((id) => id !== slug) : [...ids, slug];
+      try { localStorage.setItem(KEY, JSON.stringify(ids)); } catch { /* storage is optional */ }
+    },
+    order: (list) => [...list].sort((left, right) => Number(ids.includes(right.feed)) - Number(ids.includes(left.feed))),
+  };
+})();
+
+// The list and the digest share one pane; only one of them is ever shown.
+function showDigest(flag) {
+  $('#digest').hidden = !flag;
+  $('#items').hidden = flag;
+}
+
+/// Updates is its own page: per-category summaries of what moved, with the few
+/// items worth opening under each one.
+async function selectUpdates({ push = true } = {}) {
+  state.mode = 'updates';
+  state.tags = [];
+  state.selected = null;
+  state.items = [];
+  renderItems();
+  renderFeeds();
+  if (push) pushRoute('/updates');
+  document.body.dataset.view = 'list';
+  $('#feed-title').textContent = 'updates';
+  $('#feed-sub').textContent = `summaries of what moved in the last ${state.hours} hours`;
+  $('#feed-sub').hidden = false;
+  $('#items-note').hidden = true;
+  renderFeedLinks();
+  renderFilterbar();
+  if (state.stream) { state.stream.close(); state.stream = null; }
+  showDigest(true);
+  $('#digest').innerHTML = '<p class="note">Building the digest…</p>';
+  try {
+    renderUpdates(await api(`/api/v1/updates?hours=${state.hours}`));
+  } catch (error) {
+    $('#digest').innerHTML = `<p class="note">Could not build the digest: ${escapeHtml(error.message)}</p>`;
+  }
+  renderTagBrowser();
+}
+
+function renderUpdates(data) {
+  const categories = pins.order(data.categories || []);
+  if (!categories.length) {
+    $('#digest').innerHTML = `<p class="note">Nothing published in the last ${data.window_hours} hours.</p>`;
+    return;
+  }
+  const lead = data.summary ? `<p class="digest-lead">${escapeHtml(data.summary)}</p>` : '';
+  const blocks = categories.map((category) => `
+    <section class="digest-block">
+      <header>
+        <button type="button" class="digest-cat" data-feed="${escapeHtml(category.feed)}">${escapeHtml(category.title)}</button>
+        <span class="count">${category.count}</span>
+        <button type="button" class="opt${pins.has(category.feed) ? ' on' : ''}" data-pin="${escapeHtml(category.feed)}" title="${pins.has(category.feed) ? 'unpin' : 'pin to the top'}">pin</button>
+      </header>
+      ${category.summary ? `<p class="digest-summary">${escapeHtml(category.summary)}</p>` : ''}
+      <ul class="digest-items">${(category.items || []).map((item) => {
+        const url = safeUrl(item.url);
+        const title = escapeHtml(item.title || 'Untitled');
+        const when = escapeHtml(dayLabel(item.published_at));
+        const tags = (item.tags || []).slice(0, 3).map((tag) => `<span class="tag static">${escapeHtml(tag)}</span>`).join('');
+        return `<li>${url
+          ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${title}</a>`
+          : `<span>${title}</span>`}<span class="meta">${when}${tags ? ` ${tags}` : ''}</span></li>`;
+      }).join('')}</ul>
+    </section>`).join('');
+  $('#digest').innerHTML = lead + blocks;
+  for (const button of $$('#digest [data-feed]')) button.onclick = () => selectFeed(button.dataset.feed);
+  for (const button of $$('#digest [data-pin]')) button.onclick = () => { pins.toggle(button.dataset.pin); renderUpdates(data); };
 }
 
 // ---------------------------------------------------------------- actions
@@ -274,7 +425,7 @@ async function loadFeeds() {
     state.feeds = await api('/api/v1/public/feeds');
     renderFeeds();
     note.hidden = state.feeds.length > 0;
-    if (!state.slug && state.feeds.length) await selectFeed(state.feeds[0].slug);
+    if (!state.slug && state.feeds.length && currentPath() === '/') await selectFeed(state.feeds[0].slug);
   } catch (error) {
     note.hidden = false;
     note.textContent = `Could not load feeds: ${error.message}`;
@@ -284,28 +435,39 @@ async function loadFeeds() {
 async function loadItems(slug, { quiet = false } = {}) {
   const note = $('#items-note');
   const previous = state.selected === null ? null : state.items[state.selected]?.id;
-  const recent = state.mode === 'recent';
+  const mode = state.mode;
   try {
+    const filters = [
+      state.tags.length ? `tag=${encodeURIComponent(state.tags.join(','))}` : '',
+      state.matchAll ? 'matching=all' : '',
+      state.oldest ? 'order=oldest' : '',
+    ].filter(Boolean).join('&');
     let items;
-    if (recent) {
-      const rows = await api(`/api/v1/recent?hours=${state.hours}&limit=60`);
+    if (mode === 'search' && state.query) {
+      // Search deliberately spans the whole archive: a window is for browsing,
+      // not for finding the paper you half remember from 2013.
+      const rows = await api(`/api/v1/search?q=${encodeURIComponent(state.query)}&limit=60${filters ? `&${filters}` : ''}`);
+      items = rows.map((row) => ({ ...row, feedSlug: row.feed, feedLabel: row.feed_title }));
+    } else if (mode === 'recent') {
+      const rows = await api(`/api/v1/recent?hours=${state.hours}&limit=60${filters ? `&${filters}` : ''}`);
       items = rows.map((row) => ({ ...row, feedSlug: row.feed, feedLabel: row.feed_title }));
     } else {
-      const tag = state.tag ? `&tag=${encodeURIComponent(state.tag)}` : '';
-      const page = await api(`/api/v1/feeds/${encodeURIComponent(slug)}/items?limit=60${tag}`);
+      const page = await api(`/api/v1/feeds/${encodeURIComponent(slug)}/items?limit=60${filters ? `&${filters}` : ''}`);
       const feed = currentFeed();
       // Stamp the feed on every item so the reading pane never has to guess which
       // feed an article came from after the selection moves on.
       items = (page.items || []).map((item) => ({ ...item, feedSlug: slug, feedLabel: feed?.title || slug }));
     }
+    // Unread is a per-browser notion, so it filters here rather than server side.
+    if (state.unreadOnly) items = items.filter((item) => !read.has(item.id));
     state.items = items;
     state.selected = previous ? state.items.findIndex((item) => item.id === previous) : null;
     if (state.selected === -1) state.selected = null;
     renderItems();
     note.hidden = state.items.length > 0;
-    if (!state.items.length) note.textContent = recent
-      ? 'Nothing published in the last two days.'
-      : (state.tag ? `No items tagged “${state.tag}”.` : 'No items yet. sidefeed fetches sources on a timer.');
+    if (!state.items.length) note.textContent = mode === 'search'
+      ? `Nothing matches “${state.query}”.`
+      : (state.tags.length ? `No items tagged ${state.tags.join(' + ')}.` : (mode === 'recent' ? 'Nothing published in that window.' : 'No items yet. sidefeed fetches sources on a timer.'));
   } catch (error) {
     if (quiet) return;
     state.items = [];
@@ -317,39 +479,103 @@ async function loadItems(slug, { quiet = false } = {}) {
 
 /// Everything public from the last day or two, ranked across feeds. This is the
 /// "what is worth a look" view rather than one feed at a time.
-async function selectRecent() {
+async function selectRecent({ push = true } = {}) {
   state.mode = 'recent';
-  state.tag = '';
+  state.tags = [];
   state.selected = null;
   state.items = [];
   renderItems();
   renderFeeds();
+  if (push) pushRoute('/recents');
+  showDigest(false);
   document.body.dataset.view = 'list';
   $('#feed-title').textContent = 'recent';
   $('#feed-sub').textContent = 'across every feed, newest and most varied first';
   $('#feed-sub').hidden = false;
   $('#items-note').hidden = true;
   renderFeedLinks();
+  renderFilterbar();
   if (state.stream) { state.stream.close(); state.stream = null; }
   await loadItems('');
+  renderTagBrowser();
 }
 
-/// Narrow the current feed to one derived tag.
-function selectTag(tag) {
-  if (state.mode !== 'feed') return;
-  state.tag = tag;
+/// Search runs across every public feed, unless a feed is selected, in which
+/// case it stays inside that feed.
+async function runSearch({ push = true } = {}) {
+  const query = $('#search').value.trim();
+  if (!query) { clearSearch(); return; }
+  state.query = query;
+  state.mode = 'search';
+  state.tags = [];
   state.selected = null;
-  const feed = currentFeed();
-  $('#feed-sub').textContent = tag ? `tag: ${tag}` : (feed?.description || '');
-  $('#feed-sub').hidden = !tag && !feed?.description;
+  state.items = [];
+  renderItems();
+  renderFeeds();
+  showDigest(false);
+  if (push) pushRoute(`/search?q=${encodeURIComponent(query)}`);
+  $('#feed-title').textContent = 'search';
+  $('#feed-sub').textContent = 'across every feed';
+  $('#feed-sub').hidden = false;
+  $('#items-note').hidden = true;
   renderFeedLinks();
-  loadItems(state.slug, { quiet: true });
+  renderFilterbar();
+  if (state.stream) { state.stream.close(); state.stream = null; }
+  await loadItems(state.slug);
+  renderTagBrowser();
 }
+
+/// The search page before anything is typed: same shell, the box takes focus.
+async function openSearch({ push = true } = {}) {
+  state.mode = 'search';
+  state.query = '';
+  state.tags = [];
+  state.selected = null;
+  state.items = [];
+  renderItems();
+  renderFeeds();
+  if (push) pushRoute('/search');
+  showDigest(false);
+  $('#feed-title').textContent = 'search';
+  $('#feed-sub').textContent = 'type a word, or a few, and press enter';
+  $('#feed-sub').hidden = false;
+  $('#items-note').hidden = false;
+  $('#items-note').textContent = 'Search runs across every public feed, the whole archive included.';
+  renderFeedLinks();
+  renderFilterbar();
+  if (state.stream) { state.stream.close(); state.stream = null; }
+  $('#search').focus();
+  renderTagBrowser();
+}
+
+function clearSearch() {
+  $('#search').value = '';
+  state.query = '';
+  if (state.mode === 'search') selectRecent();
+}
+
+/// Views are addressable, so a link to /updates or /search?q=… opens the same
+/// thing a click would.
+async function applyRoute() {
+  const path = currentPath();
+  if (path === '/recents') { await selectRecent({ push: false }); return; }
+  if (path === '/updates') { await selectUpdates({ push: false }); return; }
+  if (path === '/search') {
+    const query = new URLSearchParams(location.search).get('q') || '';
+    if (query) { $('#search').value = query; await runSearch({ push: false }); } else { await openSearch({ push: false }); }
+  }
+}
+
+window.addEventListener('popstate', () => { applyRoute(); });
 
 async function selectFeed(slug) {
   state.mode = 'feed';
-  state.tag = '';
+  state.tags = [];
+  state.query = '';
+  $('#search').value = '';
   state.slug = slug;
+  pushRoute('/');
+  showDigest(false);
   state.selected = null;
   // Empty the list before fetching: rows from the previous feed must not stay
   // clickable while the new feed loads.
@@ -363,7 +589,9 @@ async function selectFeed(slug) {
   $('#feed-sub').hidden = !feed?.description;
   $('#items-note').hidden = true;
   renderFeedLinks();
+  renderFilterbar();
   await loadItems(slug);
+  renderTagBrowser();
   subscribe(slug);
 }
 
@@ -401,11 +629,21 @@ for (const [name, pane] of Object.entries(panes)) {
   chip.onclick = () => togglePane(name);
 }
 for (const rail of $$('.rail')) rail.onclick = () => togglePane(rail.dataset.rail, true);
+let searchTimer = null;
+$('#search').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 350);
+});
+$('#search').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { clearTimeout(searchTimer); runSearch(); }
+  if (event.key === 'Escape') { clearSearch(); }
+});
 $('#back').onclick = () => { document.body.dataset.view = 'list'; };
 
 document.addEventListener('keydown', (event) => {
   if (event.target.matches('input, textarea, select')) return;
-  if (event.key === 'j' || event.key === 'ArrowDown') { move(1); event.preventDefault(); }
+  if (event.key === '/') { $('#search').focus(); event.preventDefault(); }
+  else if (event.key === 'j' || event.key === 'ArrowDown') { move(1); event.preventDefault(); }
   else if (event.key === 'k' || event.key === 'ArrowUp') { move(-1); event.preventDefault(); }
   else if (event.key === 'r' && state.slug) { loadItems(state.slug); }
   else if (event.key === '1') { togglePane('feeds'); event.preventDefault(); }
@@ -414,5 +652,5 @@ document.addEventListener('keydown', (event) => {
   else if (event.key === 'Escape' && isNarrow()) { document.body.dataset.view = 'list'; }
 });
 
-loadFeeds();
-setInterval(() => { if (document.visibilityState === 'visible' && (state.slug || state.mode === 'recent')) loadItems(state.slug, { quiet: true }); }, 300000);
+loadFeeds().then(applyRoute);
+setInterval(() => { if (document.visibilityState === 'visible' && !state.query && (state.slug || state.mode === 'recent')) loadItems(state.slug, { quiet: true }); }, 300000);

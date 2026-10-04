@@ -10,11 +10,18 @@ use crate::{error::{Error, Result}, ingest, model::{EnrichedItem, Feed, Item, It
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard)).route("/app.js", get(app_js)).route("/styles.css", get(styles))
+        // The reader is one shell with addressable views, so these serve the same
+        // document and the client picks the view from the path. recents is the
+        // chronological list; updates is the per-category digest.
+        .route("/recents", get(dashboard)).route("/updates", get(dashboard)).route("/search", get(dashboard))
         .route("/docs", get(api_docs)).route("/openapi.json", get(openapi))
         .route("/fonts/{file}", get(font_asset))
         .route("/healthz", get(health)).route("/readyz", get(ready))
         .route("/api/v1/public/feeds", get(public_feeds))
+        .route("/api/v1/tags", get(public_tags))
         .route("/api/v1/recent", get(recent))
+        .route("/api/v1/updates", get(updates))
+        .route("/api/v1/search", get(search_all))
         .route("/api/v1/sources", get(list_sources).post(create_source))
         .route("/api/v1/sources/{id}/poll", post(poll_source))
         .route("/api/v1/import/opml", post(import_opml))
@@ -71,8 +78,18 @@ async fn public_feeds(State(state):State<AppState>)->Result<Json<Vec<PublicFeed>
     Ok(Json(state.store.feeds().await?.into_iter().filter(|feed|feed.public).map(|feed|PublicFeed{slug:feed.slug,title:feed.title,description:feed.description}).collect()))
 }
 
-#[derive(Deserialize)] struct RecentQuery {hours:Option<u32>,limit:Option<u32>}
+#[derive(Deserialize)] struct RecentQuery {hours:Option<u32>,limit:Option<u32>,tag:Option<String>,matching:Option<String>}
 #[derive(Serialize)] struct RecentItem {#[serde(flatten)] item:Item,feed:String,feed_title:String,tags:Vec<String>,ai_summary:Option<String>,score:f32}
+
+/// Tag counts across every public feed in a window, for the tag browser when no
+/// single feed is selected.
+#[derive(Deserialize)] struct TagQuery {hours:Option<u32>,limit:Option<u32>}async fn public_tags(State(state):State<AppState>,Query(q):Query<TagQuery>)->Result<Json<Value>>{
+    let hours=q.hours.unwrap_or(24*7).clamp(1,24*90);
+    let limit=q.limit.unwrap_or(40).clamp(1,200);
+    let since=(Utc::now()-chrono::Duration::hours(hours as i64)).to_rfc3339();
+    let tags=state.store.public_tags(&since,limit).await?;
+    Ok(Json(json!(tags.into_iter().map(|(tag,count)|json!({"tag":tag,"count":count})).collect::<Vec<_>>())))
+}
 
 /// What happened lately across every public feed, ranked by recency and source
 /// variety so one busy source cannot fill the list. Token-free, like the other
@@ -80,8 +97,9 @@ async fn public_feeds(State(state):State<AppState>)->Result<Json<Vec<PublicFeed>
 async fn recent(State(state):State<AppState>,Query(q):Query<RecentQuery>)->Result<Json<Vec<RecentItem>>>{
     let hours=q.hours.unwrap_or(48).clamp(1,336);
     let limit=q.limit.unwrap_or(40).clamp(1,200);
+    let (tags,all)=parse_tags(q.tag.as_deref(),q.matching.as_deref());
     let since=(Utc::now()-chrono::Duration::hours(hours as i64)).to_rfc3339();
-    let rows=state.store.recent_items(&since,limit.saturating_mul(4).min(400)).await?;
+    let rows=state.store.recent_items(&since,limit.saturating_mul(4).min(400),&tags,all).await?;
     let now=Utc::now();
     let mut per_source:HashMap<String,usize>=HashMap::new();
     let mut scored:Vec<(f32,ItemWithFeed)>=rows.into_iter().map(|row|{
@@ -110,6 +128,52 @@ async fn recent(State(state):State<AppState>,Query(q):Query<RecentQuery>)->Resul
     Ok(Json(items))
 }
 
+#[derive(Deserialize)] struct UpdatesQuery {hours:Option<u32>}
+
+/// Per-category rollup of what moved recently, for the updates page. Token-free
+/// because it only ever describes public feeds.
+async fn updates(State(state):State<AppState>,Query(q):Query<UpdatesQuery>)->Result<Json<crate::enrich::Updates>>{
+    Ok(Json(crate::enrich::updates(&state,q.hours.unwrap_or(48).clamp(1,168)).await?))
+}
+
+#[derive(Deserialize)] struct SearchAllQuery {q:String,hours:Option<u32>,limit:Option<u32>,feed:Option<String>,tag:Option<String>,matching:Option<String>,order:Option<String>}
+#[derive(Serialize)] struct FeedHit {#[serde(flatten)] item:Item,feed:String,feed_title:String,tags:Vec<String>,ai_summary:Option<String>}
+
+/// User text becomes an FTS5 expression: each word is quoted and prefix-matched,
+/// so punctuation and operators in a search box cannot turn into syntax errors.
+fn fts_query(raw:&str)->String{
+    raw.split_whitespace()
+        .map(|term|term.chars().filter(|character|character.is_alphanumeric()||*character=='-'||*character=='_').collect::<String>())
+        .filter(|term|!term.is_empty())
+        .map(|term|format!("\"{term}\"*"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+/// Search across every public feed, or one feed when `feed` is given. Without
+/// `hours` the window is everything, so a back-catalogue stays findable.
+async fn search_all(State(state):State<AppState>,Query(q):Query<SearchAllQuery>)->Result<Json<Vec<FeedHit>>>{
+    let query=fts_query(&q.q);
+    if query.is_empty(){return Err(Error::Invalid("q is required".into()));}
+    let limit=q.limit.unwrap_or(40).clamp(1,200);
+    let (tags,all)=parse_tags(q.tag.as_deref(),q.matching.as_deref());
+    let oldest=q.order.as_deref()==Some("oldest");
+    let since=match q.hours{
+        Some(hours)=>(Utc::now()-chrono::Duration::hours(hours.clamp(1,24*365*20) as i64)).to_rfc3339(),
+        None=>"1970-01-01T00:00:00Z".to_string(),
+    };
+    let feed=q.feed.as_deref().map(str::trim).filter(|value|!value.is_empty());
+    let rows=state.store.search_public(crate::store::SearchOptions{
+        query:&query,since:&since,limit,feed,tags:&tags,all_tags:all,oldest_first:oldest,
+    }).await?;
+    let ids:Vec<String>=rows.iter().map(|row|row.item.id.clone()).collect();
+    let atoms=crate::enrich::atoms_for(&state,&ids).await.unwrap_or_default();
+    Ok(Json(rows.into_iter().map(|row|{
+        let derived=atoms.get(&row.item.id).cloned().unwrap_or_default();
+        FeedHit{feed:row.feed_slug,feed_title:row.feed_title,item:row.item,tags:derived.tags,ai_summary:derived.summary}
+    }).collect()))
+}
+
 async fn health() -> Json<Value> { Json(json!({"status":"ok","version":env!("CARGO_PKG_VERSION")})) }
 async fn ready(State(state): State<AppState>) -> Result<Json<Value>> { state.store.ping().await?; Ok(Json(json!({"status":"ready"}))) }
 
@@ -132,11 +196,23 @@ async fn create_feed(State(state):State<AppState>,headers:HeaderMap,Json(input):
 async fn list_feeds(State(state):State<AppState>,headers:HeaderMap)->Result<Json<Vec<Feed>>>{authorize(&state,&headers)?;Ok(Json(state.store.feeds().await?))}
 async fn attach_source(State(state):State<AppState>,headers:HeaderMap,Path((slug,source_id)):Path<(String,String)>)->Result<StatusCode>{authorize(&state,&headers)?;state.store.attach_source(&slug,&source_id).await?;Ok(StatusCode::NO_CONTENT)}
 
-#[derive(Deserialize)] struct PageQuery {limit:Option<u32>,cursor:Option<String>,tag:Option<String>}
+#[derive(Deserialize)] struct PageQuery {limit:Option<u32>,cursor:Option<String>,tag:Option<String>,matching:Option<String>}
+
+/// Tags arrive comma separated, matching what the reader sends after the user
+/// clicks a few. `matching=all` switches from any-of to every-of.
+fn parse_tags(tag: Option<&str>, matching: Option<&str>) -> (Vec<String>, bool) {
+    let tags = tag.unwrap_or_default().split(',')
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .take(12)
+        .collect();
+    (tags, matching == Some("all"))
+}
+
 async fn feed_items(State(state):State<AppState>,headers:HeaderMap,Path(slug):Path<String>,Query(q):Query<PageQuery>)->Result<Json<Page<EnrichedItem>>>{
     access_feed(&state,&headers,&slug).await?;let limit=q.limit.unwrap_or(50).clamp(1,200);
-    let tag=q.tag.as_deref().map(str::trim).filter(|tag|!tag.is_empty());
-    let items=state.store.feed_items_tagged(&slug,limit,q.cursor.as_deref(),tag).await?;
+    let (tags,all)=parse_tags(q.tag.as_deref(),q.matching.as_deref());
+    let items=state.store.feed_items_tagged(&slug,limit,q.cursor.as_deref(),&tags,all).await?;
     let next_cursor=if items.len()==limit as usize{items.last().map(|i|i.published_at.clone())}else{None};
     // One query for the whole page's derived artifacts, then one small cache fill.
     let ids:Vec<String>=items.iter().map(|item|item.id.clone()).collect();

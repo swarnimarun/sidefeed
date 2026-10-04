@@ -7,6 +7,18 @@ use crate::{error::{Error, Result}, model::{Atoms, Feed, Item, ItemWithFeed, New
 #[derive(Clone)]
 pub struct Store { pool: SqlitePool }
 
+/// Options for a full-text search, grouped so call sites read as named fields
+/// rather than a long positional tail.
+pub struct SearchOptions<'a> {
+    pub query: &'a str,
+    pub since: &'a str,
+    pub limit: u32,
+    pub feed: Option<&'a str>,
+    pub tags: &'a [String],
+    pub all_tags: bool,
+    pub oldest_first: bool,
+}
+
 impl Store {
     pub async fn connect(database_url: &str) -> Result<Self> {
         let options = SqliteConnectOptions::from_str(database_url)
@@ -94,19 +106,22 @@ impl Store {
     }
 
     pub async fn feed_items(&self, slug: &str, limit: u32, cursor: Option<&str>) -> Result<Vec<Item>> {
-        self.feed_items_tagged(slug, limit, cursor, None).await
+        self.feed_items_tagged(slug, limit, cursor, &[], false).await
     }
 
-    /// Same listing, optionally narrowed to one derived tag.
-    pub async fn feed_items_tagged(&self, slug: &str, limit: u32, cursor: Option<&str>, tag: Option<&str>) -> Result<Vec<Item>> {
+    /// Same listing, optionally narrowed to tags. `all` requires every tag to be
+    /// present, otherwise any one of them is enough.
+    pub async fn feed_items_tagged(&self, slug: &str, limit: u32, cursor: Option<&str>, tags: &[String], all: bool) -> Result<Vec<Item>> {
         let feed = self.feed(slug).await?;
         let cursor = cursor.unwrap_or("9999-12-31T23:59:59Z");
-        let mut items: Vec<Item> = match tag {
-            Some(tag) => sqlx::query_as("SELECT i.* FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND i.published_at<? AND EXISTS(SELECT 1 FROM item_tags t WHERE t.item_id=i.id AND t.tag=?) ORDER BY i.published_at DESC,i.id DESC LIMIT ?")
-                .bind(&feed.id).bind(cursor).bind(tag).bind(limit).fetch_all(&self.pool).await?,
-            None => sqlx::query_as("SELECT i.* FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND i.published_at<? ORDER BY i.published_at DESC,i.id DESC LIMIT ?")
-                .bind(&feed.id).bind(cursor).bind(limit).fetch_all(&self.pool).await?,
-        };
+        let mut sql = String::from("SELECT i.* FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND i.published_at<?");
+        append_tag_clause(&mut sql, tags, all);
+        sql.push_str(" ORDER BY i.published_at DESC,i.id DESC LIMIT ?");
+
+        let mut query = sqlx::query_as::<_, Item>(&sql).bind(&feed.id).bind(cursor);
+        for tag in tags { query = query.bind(tag); }
+        if all && !tags.is_empty() { query = query.bind(tags.len() as i64); }
+        let mut items: Vec<Item> = query.bind(limit).fetch_all(&self.pool).await?;
         items.retain(|i| matches_filter(&feed, i)); Ok(items)
     }
 
@@ -179,8 +194,21 @@ impl Store {
     /// Public items published inside a window, across every public feed. One row
     /// per item even when several feeds carry it, so the caller can rank across
     /// sources without duplicates.
-    pub async fn recent_items(&self, since: &str, limit: u32) -> Result<Vec<ItemWithFeed>> {
-        Ok(sqlx::query_as("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.public=1 AND i.visibility='public' AND i.published_at>=? GROUP BY i.id ORDER BY i.published_at DESC LIMIT ?")
+    pub async fn recent_items(&self, since: &str, limit: u32, tags: &[String], all: bool) -> Result<Vec<ItemWithFeed>> {
+        let mut sql = String::from("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM items i JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.public=1 AND i.visibility='public' AND i.published_at>=?");
+        append_tag_clause(&mut sql, tags, all);
+        sql.push_str(" GROUP BY i.id ORDER BY i.published_at DESC LIMIT ?");
+
+        let mut query = sqlx::query_as::<_, ItemWithFeed>(&sql).bind(since);
+        for tag in tags { query = query.bind(tag); }
+        if all && !tags.is_empty() { query = query.bind(tags.len() as i64); }
+        Ok(query.bind(limit).fetch_all(&self.pool).await?)
+    }
+
+    /// Tag counts across every public feed inside a window. Powers the tag
+    /// browser when no single feed is selected.
+    pub async fn public_tags(&self, since: &str, limit: u32) -> Result<Vec<(String, i64)>> {
+        Ok(sqlx::query_as("SELECT t.tag, COUNT(*) AS uses FROM item_tags t JOIN items i ON i.id=t.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.public=1 AND i.published_at>=? GROUP BY t.tag ORDER BY uses DESC, t.tag LIMIT ?")
             .bind(since).bind(limit).fetch_all(&self.pool).await?)
     }
 
@@ -189,6 +217,36 @@ impl Store {
         let mut items: Vec<Item> = sqlx::query_as("SELECT i.* FROM items_fts f JOIN items i ON i.id=f.item_id JOIN feed_sources fs ON fs.source_id=i.source_id WHERE fs.feed_id=? AND items_fts MATCH ? ORDER BY bm25(items_fts),i.published_at DESC LIMIT ?")
             .bind(&feed.id).bind(query).bind(limit).fetch_all(&self.pool).await?;
         items.retain(|i| matches_filter(&feed, i)); Ok(items)
+    }
+
+    /// Full-text search across every public feed, optionally narrowed to one
+    /// feed, a time window, and a set of tags. Relevance first, then recency;
+    /// `oldest_first` flips that for reading a story chronologically.
+    ///
+    /// FTS5 only allows `bm25()` in a query that scans the index directly, so
+    /// ranking happens in an inner scan and the joins run outside it.
+    pub async fn search_public(&self, options: SearchOptions<'_>) -> Result<Vec<ItemWithFeed>> {
+        let SearchOptions { query, since, limit, feed, tags, all_tags, oldest_first } = options;
+        let (inner, rank_bound) = if oldest_first {
+            ("SELECT item_id FROM items_fts WHERE items_fts MATCH ? LIMIT 5000".to_string(), None)
+        } else {
+            let bound = limit.saturating_mul(10).clamp(50, 2000);
+            ("SELECT item_id, bm25(items_fts) AS rank FROM items_fts WHERE items_fts MATCH ? ORDER BY rank LIMIT ?".to_string(), Some(bound))
+        };
+        let mut sql = format!("SELECT i.*, f.slug AS feed_slug, f.title AS feed_title FROM ({inner}) fts JOIN items i ON i.id=fts.item_id JOIN feed_sources fs ON fs.source_id=i.source_id JOIN feeds f ON f.id=fs.feed_id WHERE f.public=1 AND i.published_at>=?");
+        if feed.is_some() { sql.push_str(" AND f.slug=?"); }
+        append_tag_clause(&mut sql, tags, all_tags);
+        sql.push_str(" GROUP BY i.id ORDER BY ");
+        sql.push_str(if oldest_first { "i.published_at ASC" } else { "MIN(fts.rank), i.published_at DESC" });
+        sql.push_str(" LIMIT ?");
+
+        let mut builder = sqlx::query_as::<_, ItemWithFeed>(&sql).bind(query);
+        if let Some(bound) = rank_bound { builder = builder.bind(bound); }
+        builder = builder.bind(since);
+        if let Some(slug) = feed { builder = builder.bind(slug); }
+        for tag in tags { builder = builder.bind(tag); }
+        if all_tags && !tags.is_empty() { builder = builder.bind(tags.len() as i64); }
+        Ok(builder.bind(limit).fetch_all(&self.pool).await?)
     }
 
     pub async fn item_in_feed(&self, slug: &str, item: &Item) -> Result<bool> {
@@ -225,6 +283,20 @@ impl Store {
     pub async fn embeddings(&self, provider: &str) -> Result<Vec<(String, Vec<f32>)>> {
         let rows: Vec<(String,String)> = sqlx::query_as("SELECT item_id,vector_json FROM embeddings WHERE provider=?").bind(provider).fetch_all(&self.pool).await?;
         rows.into_iter().map(|(id,json)| serde_json::from_str(&json).map(|v| (id,v)).map_err(|e| Error::Internal(e.to_string()))).collect()
+    }
+}
+
+/// Restricts a query that aliases `items` as `i` to a set of derived tags. `all`
+/// requires every tag; otherwise any one of them is enough. Placeholders are
+/// appended in order, so callers must bind the tags (and then the count for
+/// `all`) in the same order they appear in `tags`.
+fn append_tag_clause(sql: &mut String, tags: &[String], all: bool) {
+    if tags.is_empty() { return; }
+    let placeholders = vec!["?"; tags.len()].join(",");
+    if all {
+        sql.push_str(&format!(" AND (SELECT COUNT(DISTINCT t.tag) FROM item_tags t WHERE t.item_id=i.id AND t.tag IN ({placeholders}))=?"));
+    } else {
+        sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM item_tags t WHERE t.item_id=i.id AND t.tag IN ({placeholders}))"));
     }
 }
 

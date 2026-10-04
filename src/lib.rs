@@ -22,6 +22,8 @@ pub struct AppState {
     /// Bounded cache of derived artifacts. Deliberately the only thing about
     /// enrichment that lives in memory; everything else stays on disk.
     pub atoms: Arc<enrich::AtomCache>,
+    /// The most recent per-category digest, rebuilt at most once per TTL.
+    pub updates: Arc<enrich::UpdatesCache>,
 }
 
 impl AppState {
@@ -36,6 +38,6 @@ impl AppState {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let (events, _) = broadcast::channel(256);
-        Ok(Self { config: Arc::new(config), store, http, events, atoms: Arc::new(enrich::AtomCache::default()) })
+        Ok(Self { config: Arc::new(config), store, http, events, atoms: Arc::new(enrich::AtomCache::default()), updates: Arc::new(enrich::UpdatesCache::default()) })
     }
 }

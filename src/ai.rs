@@ -64,7 +64,7 @@ fn provider(state:&AppState)->Result<Arc<dyn EmbeddingProvider>>{
 }
 
 async fn embed_item(State(state):State<AppState>,headers:HeaderMap,Path(id):Path<String>)->Result<(StatusCode,Json<Value>)>{
-    authorize(&state,&headers)?;let item=state.store.item(&id).await?;let provider=provider(&state)?;let vector=provider.embed(&item_text(&item)).await?;state.store.put_embedding(&item.id,provider.name(),&vector).await?;Ok((StatusCode::CREATED,Json(json!({"item_id":item.id,"provider":provider.name(),"dimensions":vector.len()}))))
+    authorize(&state,&headers)?;let item=state.store.item(&id).await?;let provider=provider(&state)?;let vector=provider.embed(&item_text(&item)).await?;state.store.put_embedding(&item.id,provider.name(),&vector).await?;Ok((StatusCode::CREATED,Json(json!({"item_id":item.id,"dimensions":vector.len()}))))
 }
 
 #[derive(Deserialize)] struct SemanticQuery {q:String,limit:Option<u32>}

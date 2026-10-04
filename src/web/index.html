@@ -22,6 +22,7 @@
         <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10 2.5v11"/></svg>
       </button>
     </nav>
+    <input class="search" id="search" type="search" placeholder="search" aria-label="search every feed" autocomplete="off">
     <nav class="bar-links"><a href="/docs">docs</a></nav>
   </header>
 
@@ -29,6 +30,10 @@
     <aside class="pane sidebar" id="pane-feeds">
       <button class="rail" type="button" data-rail="feeds" title="unfold feeds pane">feeds</button>
       <ul class="feeds" id="feeds"></ul>
+      <div class="side-block" id="tag-block" hidden>
+        <p class="side-label">tags</p>
+        <div class="tag-list" id="tags"></div>
+      </div>
       <p class="note" id="feeds-note" hidden>
         No public feeds yet. Add one through the <a href="/docs">API</a> and mark it public.
       </p>
@@ -44,6 +49,8 @@
         </div>
         <div class="list-links" id="feed-links"></div>
       </header>
+      <div class="filterbar" id="filterbar" hidden></div>
+      <div class="digest" id="digest" hidden></div>
       <ol class="items" id="items"></ol>
       <p class="note" id="items-note" hidden></p>
     </section>
