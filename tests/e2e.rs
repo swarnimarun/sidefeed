@@ -58,9 +58,20 @@ async fn ui_health_and_openapi_are_served() {
     // The reader is public and read-only: it must never collect the admin token.
     assert!(!html.contains("type=\"password\""), "the reader UI must not ask for a token");
     assert!(!html.contains("localStorage.setItem('sidefeed-token'"), "the reader UI must not store a token");
-    // Panes are collapsible and the interface ships the self-hosted font.
-    assert!(html.contains("toggle-feeds") && html.contains("toggle-items") && html.contains("toggle-article"));
-    assert!(html.contains("/styles.css"));
+    // The reader is a built app: its bundle and stylesheet are real files, and
+    // the client-side routes all serve the same shell so they can deep-link.
+    for route in ["/recents", "/updates", "/search"] {
+        let response = app.clone().oneshot(request("GET", route, None, false)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route} should serve the app shell");
+        assert!(response.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
+    }
+    let bundle = app.clone().oneshot(request("GET", "/app.js", None, false)).await.unwrap();
+    assert_eq!(bundle.status(), StatusCode::OK);
+    assert!(bundle.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/javascript"));
+    // Unknown API paths stay JSON rather than falling through to the shell.
+    let missing = app.clone().oneshot(request("GET", "/api/v1/nothing-here", None, false)).await.unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert!(missing.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("application/json"));
 
     let health = app.clone().oneshot(request("GET", "/healthz", None, false)).await.unwrap();
     assert_eq!(health.status(), StatusCode::OK);
@@ -78,8 +89,6 @@ async fn ui_health_and_openapi_are_served() {
     assert_eq!(font.status(), StatusCode::OK);
     assert_eq!(font.headers()[header::CONTENT_TYPE].to_str().unwrap(), "font/woff2");
     assert!(to_bytes(font.into_body(), 2 * 1024 * 1024).await.unwrap().len() > 10_000, "the bundled font is served");
-    let unknown = app.oneshot(request("GET", "/fonts/not-a-bundled-font.woff2", None, false)).await.unwrap();
-    assert_eq!(unknown.status(), StatusCode::NOT_FOUND, "only bundled asset names resolve");
 }
 
 #[tokio::test]
@@ -166,8 +175,8 @@ async fn web_dir_overrides_assets_and_picks_up_edits_without_a_restart() {
     let script = app.clone().oneshot(request("GET", "/app.js", None, false)).await.unwrap();
     assert_eq!(String::from_utf8(to_bytes(script.into_body(), 1024 * 1024).await.unwrap().to_vec()).unwrap(), "/* overridden by the operator */");
 
-    // Assets the directory does not contain still come from the binary.
-    let styles = app.oneshot(request("GET", "/styles.css", None, false)).await.unwrap();
+    // A file the override directory does not contain still comes from the binary.
+    let styles = app.oneshot(request("GET", "/app.css", None, false)).await.unwrap();
     assert_eq!(styles.status(), StatusCode::OK);
     assert!(styles.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/css"));
     assert!(!to_bytes(styles.into_body(), 2 * 1024 * 1024).await.unwrap().is_empty());

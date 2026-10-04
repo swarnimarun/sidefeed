@@ -1,5 +1,5 @@
 import { A, Route, Router, useNavigate, useParams, useSearchParams } from '@solidjs/router';
-import { For, Show, createEffect, createResource, createSignal, onCleanup } from 'solid-js';
+import { For, Show, createEffect, createResource, createSignal, onCleanup, type JSX } from 'solid-js';
 import { filterQuery, feeds, feedItems, hostOf, recent, safeUrl, search, type Filters as ApiFilters, type Item } from './api';
 import { filtersFromParams, isPinned, isRead, markRead, paramsFromFilters, pins, togglePin, type Filters } from './state';
 import { UpdatesView } from './views/Updates';
@@ -155,21 +155,31 @@ function Sidebar() {
   );
 }
 
-export default function App() {
+/// The chrome lives in the router's root layout, the only place outside a route
+/// that may use router primitives like A.
+function Layout(props: { children?: JSX.Element }) {
   return (
-    <Router>
+    <>
       <header class="bar">
         <span class="wordmark">sidefeed</span>
         <nav class="bar-links"><a href="/docs">docs</a></nav>
       </header>
       <main class="layout">
         <Sidebar />
-        <Route path="/" component={RecentsView} />
-        <Route path="/recents" component={RecentsView} />
-        <Route path="/updates" component={UpdatesView} />
-        <Route path="/search" component={SearchView} />
-        <Route path="/:slug" component={FeedView} />
+        {props.children}
       </main>
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <Router root={Layout}>
+      <Route path="/" component={RecentsView} />
+      <Route path="/recents" component={RecentsView} />
+      <Route path="/updates" component={UpdatesView} />
+      <Route path="/search" component={SearchView} />
+      <Route path="/:slug" component={FeedView} />
     </Router>
   );
 }

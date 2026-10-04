@@ -17,6 +17,7 @@ feed-rs = "2"
 futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
+include_dir = "0.7"
 quick-xml = "0.37"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }

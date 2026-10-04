@@ -1,6 +1,7 @@
 use std::{cmp::Ordering, collections::HashMap, convert::Infallible, time::Duration};
 use async_stream::stream;
-use axum::{body::{Body, Bytes}, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::{IntoResponse, Response, Sse, sse::Event}, routing::{get, post}, Json, Router};
+use axum::{body::{Body, Bytes}, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri}, response::{IntoResponse, Response, Sse, sse::Event}, routing::{get, post}, Json, Router};
+use include_dir::{include_dir, Dir};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -9,13 +10,7 @@ use crate::{error::{Error, Result}, ingest, model::{EnrichedItem, Feed, Item, It
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(dashboard)).route("/app.js", get(app_js)).route("/styles.css", get(styles))
-        // The reader is one shell with addressable views, so these serve the same
-        // document and the client picks the view from the path. recents is the
-        // chronological list; updates is the per-category digest.
-        .route("/recents", get(dashboard)).route("/updates", get(dashboard)).route("/search", get(dashboard))
         .route("/docs", get(api_docs)).route("/openapi.json", get(openapi))
-        .route("/fonts/{file}", get(font_asset))
         .route("/healthz", get(health)).route("/readyz", get(ready))
         .route("/api/v1/public/feeds", get(public_feeds))
         .route("/api/v1/tags", get(public_tags))
@@ -34,42 +29,73 @@ pub fn router(state: AppState) -> Router {
         .route("/feeds/{slug}/newsletter", get(newsletter))
         .route("/feeds/{slug}/thread.json", get(social_thread))
         .merge(crate::federation::router()).merge(crate::ai::router()).merge(crate::enrich::router())
+        // Anything the API did not claim belongs to the reader, including its
+        // client-side routes.
+        .fallback(serve_ui)
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT,Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http()).with_state(state)
 }
 
-// The interface is compiled into the binary, but `SIDEFEED_WEB_DIR` lets an
-// operator override any asset (index.html, app.js, styles.css, docs.html,
-// openapi.json, fonts) from a directory on the host. Assets are read per
-// request, so the UI can be edited on a running service without rebuilding or
-// restarting it. Override files sit flat in that directory, even for fonts.
-fn embedded_asset(name:&str)->Option<(&'static [u8],&'static str)>{
-    Some(match name{
-        "index.html"=>(include_str!("web/index.html").as_bytes(),"text/html; charset=utf-8"),
-        "app.js"=>(include_str!("web/app.js").as_bytes(),"text/javascript; charset=utf-8"),
-        "styles.css"=>(include_str!("web/styles.css").as_bytes(),"text/css; charset=utf-8"),
-        "docs.html"=>(include_str!("web/docs.html").as_bytes(),"text/html; charset=utf-8"),
-        "openapi.json"=>(include_str!("web/openapi.json").as_bytes(),"application/json; charset=utf-8"),
-        "Libron-Regular.woff2"=>(include_bytes!("web/fonts/Libron-Regular.woff2"),"font/woff2"),
-        "Libron-Italic.woff2"=>(include_bytes!("web/fonts/Libron-Italic.woff2"),"font/woff2"),
-        "Libron-Bold.woff2"=>(include_bytes!("web/fonts/Libron-Bold.woff2"),"font/woff2"),
-        _=>return None,
-    })
-}
-async fn web_asset(state:&AppState,name:&str)->Response{
-    let Some((embedded,content_type))=embedded_asset(name) else {return (StatusCode::NOT_FOUND,"unknown asset").into_response()};
-    if let Some(directory)=&state.config.web_dir{
-        if let Ok(body)=tokio::fs::read(directory.join(name)).await{return with_bytes(body,content_type);}
+// The reader is built by Vite into `web/` and committed, so the binary carries
+// the whole interface. `SIDEFEED_WEB_DIR` overrides any of it from disk, which
+// is how the UI is edited on a running host without a rebuild.
+static DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/web/dist");
+
+fn content_type_for(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "woff2" => "font/woff2",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        _ => "application/octet-stream",
     }
-    with_bytes(embedded.to_vec(),content_type)
 }
-async fn font_asset(State(state):State<AppState>,Path(file):Path<String>)->Response{web_asset(&state,&file).await}
-async fn dashboard(State(state):State<AppState>)->Response{web_asset(&state,"index.html").await}
-async fn api_docs(State(state):State<AppState>)->Response{web_asset(&state,"docs.html").await}
-async fn app_js(State(state):State<AppState>)->Response{web_asset(&state,"app.js").await}
-async fn styles(State(state):State<AppState>)->Response{web_asset(&state,"styles.css").await}
-async fn openapi(State(state):State<AppState>)->Response{web_asset(&state,"openapi.json").await}
+
+/// Disk first so edits land immediately, then the copy compiled into the binary.
+async fn read_asset(state: &AppState, path: &str) -> Option<Vec<u8>> {
+    if let Some(directory) = &state.config.web_dir {
+        if let Ok(bytes) = tokio::fs::read(directory.join(path)).await { return Some(bytes); }
+    }
+    DIST.get_file(path).map(|file| file.contents().to_vec())
+}
+
+async fn asset_response(state: &AppState, path: &str) -> Option<Response> {
+    let bytes = read_asset(state, path).await?;
+    Some(with_bytes(bytes, content_type_for(path)))
+}
+
+/// Serves the reader: a real file when the path names one, otherwise the app
+/// shell so client-side routes deep-link. API paths keep answering JSON.
+async fn serve_ui(State(state): State<AppState>, method: Method, uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    if path.starts_with("api/") || path.starts_with("federation/") {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response();
+    }
+    if method == Method::GET || method == Method::HEAD {
+        if !path.is_empty() {
+            if let Some(response) = asset_response(&state, path).await { return response; }
+        }
+        if let Some(response) = asset_response(&state, "index.html").await { return response; }
+    }
+    (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+/// Small text documents that stay service-owned and overridable: the API
+/// reference and its spec.
+async fn text_asset(state: &AppState, name: &str, fallback: &'static str, content_type: &'static str) -> Response {
+    if let Some(directory) = &state.config.web_dir {
+        if let Ok(bytes) = tokio::fs::read(directory.join(name)).await { return with_bytes(bytes, content_type); }
+    }
+    with_type(fallback.to_owned(), content_type)
+}
+
+async fn api_docs(State(state): State<AppState>) -> Response { text_asset(&state, "docs.html", include_str!("web/docs.html"), "text/html; charset=utf-8").await }
+async fn openapi(State(state): State<AppState>) -> Response { text_asset(&state, "openapi.json", include_str!("web/openapi.json"), "application/json; charset=utf-8").await }
 
 /// Public feed index for the read-only reader interface. Management views keep
 /// requiring the admin token; this projection exposes only feeds marked public.
@@ -83,7 +109,8 @@ async fn public_feeds(State(state):State<AppState>)->Result<Json<Vec<PublicFeed>
 
 /// Tag counts across every public feed in a window, for the tag browser when no
 /// single feed is selected.
-#[derive(Deserialize)] struct TagQuery {hours:Option<u32>,limit:Option<u32>}async fn public_tags(State(state):State<AppState>,Query(q):Query<TagQuery>)->Result<Json<Value>>{
+#[derive(Deserialize)] struct TagQuery {hours:Option<u32>,limit:Option<u32>}
+async fn public_tags(State(state):State<AppState>,Query(q):Query<TagQuery>)->Result<Json<Value>>{
     let hours=q.hours.unwrap_or(24*7).clamp(1,24*90);
     let limit=q.limit.unwrap_or(40).clamp(1,200);
     let since=(Utc::now()-chrono::Duration::hours(hours as i64)).to_rfc3339();
