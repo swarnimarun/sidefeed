@@ -182,3 +182,56 @@ pub fn prune_idle(layer: &RateLimitLayer, idle: Duration) {
         now.duration_since(bucket.last) < idle || bucket.tokens < f64::from(layer.inner.burst)
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+
+    fn req_with_ip(ip: &str) -> Request<Body> {
+        let addr: SocketAddr = format!("{ip}:1234").parse().unwrap();
+        let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(addr));
+        req
+    }
+
+    #[test]
+    fn headers_do_not_create_fresh_buckets() {
+        // Different spoof headers share the global bucket when no ConnectInfo is present.
+        let a = Request::builder().uri("/").header("x-forwarded-for", "1.1.1.1").body(Body::empty()).unwrap();
+        let b = Request::builder().uri("/").header("x-forwarded-for", "9.9.9.9").body(Body::empty()).unwrap();
+        assert_eq!(client_key(&a), "global");
+        assert_eq!(client_key(&b), "global");
+    }
+
+    #[test]
+    fn per_ip_buckets_are_isolated() {
+        let a = req_with_ip("10.0.0.1");
+        let b = req_with_ip("10.0.0.2");
+        assert_eq!(client_key(&a), "ip:10.0.0.1");
+        assert_eq!(client_key(&b), "ip:10.0.0.2");
+        assert_ne!(client_key(&a), client_key(&b));
+    }
+
+    #[tokio::test]
+    async fn bucket_refills_over_time() {
+        use tower::ServiceExt;
+        // 1 rps, burst 2: two immediate requests pass, third is limited, then refill.
+        let layer = RateLimitLayer::new(1, 2);
+        let svc = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, Infallible>(axum::http::Response::new(Body::empty()))
+        });
+        let limited = layer.layer(svc);
+        for _ in 0..2 {
+            let res: Response = limited.clone().oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()).await.unwrap();
+            assert_ne!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        let res: Response = limited.clone().oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(res.headers().contains_key("retry-after"));
+        // After ~1.2s one token refills.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let res: Response = limited.clone().oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()).await.unwrap();
+        assert_ne!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+}

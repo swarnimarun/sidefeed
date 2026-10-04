@@ -112,3 +112,59 @@ pub async fn require_scope(
     let _ = state.store.touch_key(&key.id).await;
     Ok(key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{net::SocketAddr, time::Duration};
+    use crate::config::{Config, EnrichConfig};
+
+    async fn test_state() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+        let config = Config {
+            listen: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            database_url: url,
+            public_url: "http://test.test".into(),
+            fetch_interval: Duration::from_secs(900),
+            fetch_timeout: Duration::from_secs(5),
+            max_response_bytes: 1024 * 1024,
+            peer_max_items: 100,
+            retention_days: 90,
+            admin_token: Some("test-secret".into()),
+            embedding_url: None,
+            embedding_token: None,
+            embedding_provider: "disabled".into(),
+            onnx_embed_model: None,
+            ap_enabled: false,
+            enrich: EnrichConfig::default(),
+            web_dir: None,
+            api_keys_enabled: false,
+            bookmarks_require_auth: false,
+            rate_rps: 5,
+            rate_burst: 20,
+        };
+        let state = AppState::new(config).await.unwrap();
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn mint_rejects_bad_names_and_scopes() {
+        let (state, _d) = test_state().await;
+        // Empty and overlong names.
+        assert!(mint_key(&state, "", &["read:private".into()]).await.is_err());
+        assert!(mint_key(&state, "   ", &["read:private".into()]).await.is_err());
+        assert!(mint_key(&state, &"x".repeat(65), &["read:private".into()]).await.is_err());
+        // Empty, too many, empty-entry, and overlong scopes.
+        assert!(mint_key(&state, "ok", &[]).await.is_err());
+        let many: Vec<String> = (0..17).map(|i| format!("s{i}")).collect();
+        assert!(mint_key(&state, "ok", &many).await.is_err());
+        assert!(mint_key(&state, "ok", &["".into()]).await.is_err());
+        assert!(mint_key(&state, "ok", &["   ".into()]).await.is_err());
+        assert!(mint_key(&state, "ok", &["x".repeat(65)]).await.is_err());
+        // Valid mint succeeds and yields an sf_ token.
+        let (token, key) = mint_key(&state, "ok", &["read:private".into()]).await.unwrap();
+        assert!(token.starts_with("sf_"));
+        assert_eq!(key.name, "ok");
+    }
+}

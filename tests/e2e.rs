@@ -440,14 +440,120 @@ async fn seed_two_items(state: &AppState) {
 async fn ask_answers_from_the_index_without_a_model() {
     let (app, state, _d) = fixture_with_enrichment().await;
     seed_two_items(&state).await;
-    let res = app.oneshot(request("POST", "/api/v1/feeds/gfx/ask",
+    let res = app.clone().oneshot(request("POST", "/api/v1/feeds/gfx/ask",
         Some(json!({"q":"descriptor layout"})), false)).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body = json_body(res).await;
-    assert!(!body["answer"].as_str().unwrap_or("").is_empty());
-    assert!(!body["citations"].as_array().unwrap().is_empty());
+    let answer = body["answer"].as_str().unwrap_or("");
+    assert!(answer.starts_with("from Bindingless"), "answer must quote the descriptor hit first: {answer}");
+    let citations = body["citations"].as_array().unwrap();
+    assert!(!citations.is_empty());
+    assert!(citations[0]["title"].as_str().unwrap_or("").contains("Bindingless"),
+        "descriptor citation must come first: {citations:?}");
+    // Empty questions are rejected.
+    let empty = app.clone().oneshot(request("POST", "/api/v1/feeds/gfx/ask",
+        Some(json!({"q":"   "})), false)).await.unwrap();
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+    // No-hit queries answer the exact empty sentence.
+    let nohit = app.oneshot(request("POST", "/api/v1/feeds/gfx/ask",
+        Some(json!({"q":"zxqv wqxy no such words"})), false)).await.unwrap();
+    assert_eq!(nohit.status(), StatusCode::OK);
+    assert_eq!(json_body(nohit).await["answer"], "No matching items in this feed.");
 }
 // ---- end Task 6 ----
+
+#[tokio::test]
+async fn live_read_key_lists_sources_before_revoke() {
+    let (app, _state, _d) = fixture().await;
+    let minted = app.clone().oneshot(request("POST", "/api/v1/keys",
+        Some(json!({"name":"reader","scopes":["read:private"]})), true)).await.unwrap();
+    assert_eq!(minted.status(), StatusCode::CREATED);
+    let body = json_body(minted).await;
+    let token = body["token"].as_str().unwrap().to_string();
+    let id = body["id"].as_str().unwrap().to_string();
+    let ok = app.clone().oneshot(keyed("GET", "/api/v1/sources", None, &token)).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::OK, "live read:private key must list sources");
+    // Revocation is covered elsewhere; sanity-check the id parses.
+    assert!(!id.is_empty());
+}
+
+#[tokio::test]
+async fn webhook_wrong_secret_and_missing_credential_are_rejected() {
+    let (app, state, _d) = fixture().await;
+    let source = state.store.create_source("webhook:sec", "webhook", None).await.unwrap();
+    state.store.create_feed("sec", "Sec", None, None, None, true).await.unwrap();
+    state.store.attach_source("sec", &source.id).await.unwrap();
+    state.store.create_channel("sec", &sidefeed::auth::hash_token("right"), Some(&source.id)).await.unwrap();
+    let body = json!({"items":[{"id":"s1","title":"hi"}]});
+    let before = state.store.feed_items("sec", 10, None).await.unwrap().len();
+    let wrong = app.clone().oneshot(signed_ingress("POST", "/api/v1/ingress/sec", body.clone(), "wrong")).await.unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    let missing = Request::builder().method("POST").uri("/api/v1/ingress/sec")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string())).unwrap();
+    let missing = app.clone().oneshot(missing).await.unwrap();
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+    let after = state.store.feed_items("sec", 10, None).await.unwrap().len();
+    assert_eq!(before, after, "rejected ingress must not store");
+}
+
+#[test]
+fn raw_json_select_items_rejects_bad_pointers() {
+    use sidefeed::channels::{select_items, RawJsonConfig};
+    let doc = json!({"data": {"posts": [{"id": "a"}]}, "scalar": 42});
+    // Missing pointer.
+    let missing = RawJsonConfig { items_pointer: "/nope".into(), ..Default::default() };
+    assert!(select_items(&doc, &missing).is_err());
+    // Out-of-range index.
+    let oob = RawJsonConfig { items_pointer: "/data/posts/99".into(), ..Default::default() };
+    assert!(select_items(&doc, &oob).is_err());
+    // Scalar hit.
+    let scalar = RawJsonConfig { items_pointer: "/data/posts/0/id/0".into(), ..Default::default() };
+    // Walks into a string then indexes: scalar hit.
+    let scalar2 = RawJsonConfig { items_pointer: "/scalar/0".into(), ..Default::default() };
+    assert!(select_items(&doc, &scalar2).is_err());
+    let _ = scalar;
+    // Non-array selection.
+    let nonarray = RawJsonConfig { items_pointer: "/data".into(), ..Default::default() };
+    assert!(select_items(&doc, &nonarray).is_err());
+    // 501-item limit.
+    let big = json!({"items": (0..501).map(|i| json!({"id": format!("i-{i}")})).collect::<Vec<_>>()});
+    let def = RawJsonConfig::default();
+    assert!(select_items(&big, &def).is_err());
+}
+
+#[tokio::test]
+async fn strict_key_limiter_eventually_429s() {
+    let (app, _, _d) = fixture().await;
+    let mut limited = false;
+    for i in 0..30 {
+        let res = app.clone().oneshot(request("POST", "/api/v1/keys",
+            Some(json!({"name": format!("k-{i}"), "scopes": ["read:private"]})), true)).await.unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(res.headers().contains_key("retry-after"));
+            limited = true; break;
+        }
+        // Created (201) or conflict-free; any non-429 keeps the loop going.
+        assert!(res.status() == StatusCode::CREATED || res.status() == StatusCode::TOO_MANY_REQUESTS);
+    }
+    assert!(limited, "30 rapid key mints must trip the strict 1rps/10-burst bucket");
+}
+
+#[tokio::test]
+async fn ask_limiter_eventually_429s() {
+    let (app, state, _d) = fixture_with_enrichment().await;
+    seed_two_items(&state).await;
+    let mut limited = false;
+    for _ in 0..30 {
+        let res = app.clone().oneshot(request("POST", "/api/v1/feeds/gfx/ask",
+            Some(json!({"q":"descriptor"})), false)).await.unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(res.headers().contains_key("retry-after"));
+            limited = true; break;
+        }
+    }
+    assert!(limited, "30 rapid asks must trip the 1rps/5-burst ask bucket");
+}
 
 #[tokio::test]
 async fn enrichment_cache_never_grows_past_its_cap() {
