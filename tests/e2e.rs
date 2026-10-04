@@ -371,3 +371,19 @@ async fn scoped_keys_gate_management_and_support_revocation() {
     assert_eq!(gone.status(), StatusCode::UNAUTHORIZED);
 }
 // --- end lane-authsec Task 1 ---
+
+// --- lane-authsec: global governor 429 (Task 8 rate-limit half) ---
+#[tokio::test]
+async fn burst_traffic_gets_a_429_with_retry_after() {
+    let (app, _, _d) = fixture().await;
+    let mut limited = false;
+    for _ in 0..200 {
+        let res = app.clone().oneshot(request("GET", "/api/v1/recent", None, false)).await.unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(res.headers().contains_key("retry-after"), "governor must set retry-after");
+            limited = true; break;
+        }
+    }
+    assert!(limited, "200 rapid requests must trip the global limiter in tests");
+}
+// --- end lane-authsec Task 8 ---
