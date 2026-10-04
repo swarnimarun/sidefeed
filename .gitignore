@@ -1,2 +1,5 @@
 /target
 /db
+web/node_modules
+web/.vite
+*.tgz
