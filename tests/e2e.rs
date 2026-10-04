@@ -83,7 +83,7 @@ async fn webhook_channel_ingests_a_signed_batch() {
         Some(json!({"slug":"ops","title":"Ops","public":true})), true)).await.unwrap();
     assert_eq!(created.status(), StatusCode::CREATED);
     state.store.attach_source("ops", &source.id).await.unwrap();
-    let channel = state.store.create_channel("deploys", &sidefeed::channels::hash_secret("s3cret"), Some(&source.id)).await.unwrap();
+    let channel = state.store.create_channel("deploys", &sidefeed::auth::hash_token("s3cret"), Some(&source.id)).await.unwrap();
     assert_eq!(channel.slug, "deploys");
     let body = json!({"items":[{"id":"d1","title":"deploy v42","url":"https://ex.example/d/42"}]});
     let res = app.oneshot(signed_ingress("POST", "/api/v1/ingress/deploys", body, "s3cret")).await.unwrap();

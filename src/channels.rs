@@ -12,7 +12,7 @@
 use axum::http::{HeaderMap, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -22,14 +22,9 @@ use crate::{
     AppState,
 };
 
-/// SHA-256 of a channel secret, hex-encoded. Only this hash is stored; the
-/// plaintext travels per request and is never persisted.
-/// NOTE (lane-ingest): identical construction to the auth lane's token hash.
-/// If `auth::hash_token` lands first, this can delegate to it; the stored
-/// values stay byte-identical either way.
-pub fn hash_secret(secret: &str) -> String {
-    hex::encode(Sha256::digest(secret.as_bytes()))
-}
+/// Channel secrets hash exactly like API tokens; one construction, one place.
+/// Stored values are byte-identical to earlier `hash_secret` output.
+pub use crate::auth::hash_token as hash_secret;
 
 /// At most one webhook batch carries this many items. Above it the ingress
 /// route answers 413 instead of partially ingesting.

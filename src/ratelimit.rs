@@ -57,6 +57,13 @@ impl RateLimitLayer {
         Self::new(1, 10)
     }
 
+    /// Ask endpoint: 1 rps sustained, burst 5. One question is cheap (bounded
+    /// FTS plus capped vectors), but model-backed answers must not be
+    /// machine-gunnable, so bursts past five answer 429 + Retry-After.
+    pub fn ask() -> Self {
+        Self::new(1, 5)
+    }
+
     fn new(rps: u32, burst: u32) -> Self {
         Self {
             inner: Arc::new(Inner {

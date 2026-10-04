@@ -3,17 +3,18 @@
 //! extractive fallback that quotes the index when no model is configured.
 //!
 //! `POST /api/v1/feeds/{slug}/ask {q} -> {answer, citations}`. The question is
-//! capped at 500 chars. Per-IP rate limiting for this route lands with the auth
-//! lane's governor (Tasks 1/8); until then the cap plus the bounded FTS/vector
-//! lookups keep one question cheap.
+//! capped at 500 chars and the route carries its own strict limiter (burst 5),
+//! so model-backed answers cannot be machine-gunned.
 
 use std::collections::HashMap;
 use axum::{extract::{Path, State}, http::HeaderMap, routing::post, Json, Router};
 use serde_json::{json, Value};
-use crate::{error::{Error, Result}, model::Item, AppState};
+use crate::{error::{Error, Result}, model::Item, ratelimit::RateLimitLayer, AppState};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/v1/feeds/{slug}/ask", post(ask))
+    Router::new()
+        .route("/api/v1/feeds/{slug}/ask", post(ask))
+        .layer(RateLimitLayer::ask())
 }
 
 #[derive(serde::Deserialize)]
