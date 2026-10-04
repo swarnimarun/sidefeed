@@ -1,5 +1,6 @@
 /target
 /db
+.env
 web/node_modules
 web/.vite
 *.tgz
