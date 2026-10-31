@@ -6,7 +6,7 @@ def capture(page, filename):
  expect(page.locator('#main')).to_be_visible()
  expect(page.locator('.loading')).to_have_count(0)
  expect(page.locator('#toast')).to_have_text('',timeout=7000)
- page.screenshot(path=os.path.join(out,filename),full_page=True)
+ page.screenshot(path=os.path.join(out,filename),full_page=not filename.startswith('mobile-'))
 def navigate(page, view):
  # Exercise real masthead, bottom-navigation or utility controls; never inject routes.
  anchors=page.locator('a[href="#'+view+'"]:visible')
@@ -174,6 +174,10 @@ with sync_playwright() as p:
  capture(page,'mobile-reader-context.png')
  lead.get_by_text('Related & source details',exact=False).click()
  expect(lead.get_by_role('heading',name='Source provenance',exact=True)).to_be_hidden()
+ page.evaluate('window.scrollTo(0, 0)')
+ third_heading=page.locator('article.story h2').nth(2).bounding_box()
+ bottom_navigation=page.locator('.bottom-nav').bounding_box()
+ assert third_heading and bottom_navigation and third_heading['y']+third_heading['height'] <= bottom_navigation['y']-8, 'Third mobile headline hidden behind bottom navigation'
  capture(page,'mobile-reader.png')
  assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile horizontal overflow'
  navigate(page,'threads')
