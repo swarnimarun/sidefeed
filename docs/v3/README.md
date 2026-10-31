@@ -16,9 +16,9 @@ These capabilities are required V3 scope. Milestones sequence the work; they do 
 
 ## Runnable first slice
 
-The implementation lives in [`v3/`](../../v3/), using Node 24 built-in HTTP/SQLite and a dependency-light web UI. Start with the [run guide](IMPLEMENTATION.md), [QA evidence](QA.md), [design contract](DESIGN.md) and [integration contracts](INTEGRATIONS.md). The approved Commonplace × Dispatch reading-room design is applied: stacked editorial stories, warm archive surfaces and metadata-based related context, with no invented collections or AI recommendation claims.
+The implementation lives in [`v3/`](../../v3/), using Node 24 built-in HTTP/SQLite and a dependency-light web UI. Start with the [run guide](IMPLEMENTATION.md), [QA evidence](QA.md), [design contract](DESIGN.md) and [integration contracts](INTEGRATIONS.md). A fresh modular frontend implements the selected Commonplace × Dispatch reading-room direction: stacked editorial stories, warm archive surfaces and metadata-based related context, with no invented collections or AI recommendation claims.
 
-[Reading-room CI](https://github.com/swarnimarun/sidefeed/actions/runs/41211874519) passed at `ab40b23b17e948eee63ba6bf6e41e3e6dc151ca4`: 53 tests, 16 syntax checks, browser/protected-token/consent flows, 14 screenshots and container smoke. Desktop reader, compact/expanded mobile and publish views from artifact `13046154447` were reviewed; the final screenshot-wait refinement passed. Real provider quality, full social federation and production readiness are not claimed.
+[Fresh-frontend CI](https://github.com/swarnimarun/sidefeed/actions/runs/41214495602) at `723557df29b431041a0cb58cb657e7325285439c` passed **62 tests, 23 recursive JavaScript syntax checks, the full browser/protected-token/consent/draft/navigation suite and container smoke**. Actual desktop/mobile screenshots in artifact `13047443684` passed visual comparison against five selected-concept criteria: working masthead navigation, reading-only archive, bold serif hierarchy, 65/35 article/context layout, and phone bottom navigation with the third headline above it. This is objective comparison evidence, not pixel identity or user approval of the latest delivery. Full social federation, live-provider quality and production readiness remain unverified.
 
 ## Read in this order
 

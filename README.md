@@ -2,7 +2,7 @@
 
 The new runnable prototype is in [`v3/`](v3/). Start with the [V3 run guide](docs/v3/IMPLEMENTATION.md), [architecture](docs/v3/ARCHITECTURE-PLAN.md) and [verification report](docs/v3/QA.md).
 
-Node 24 + SQLite, a minimal Commonplace × Dispatch reading UI, approval-gated website discovery, local publishing and trusted-node cached SSE updates. This is an early implementation, not the full AI/ActivityPub/ATProto product or a production-ready deployment. The 53-test suite, fixture-backed desktop/mobile browser flows and container smoke checks pass in CI; live providers, real federation and production deployment remain unverified.
+Node 24 + SQLite, a rebuilt modular Commonplace × Dispatch editorial frontend, approval-gated website discovery, local publishing and trusted-node cached SSE updates. This is an early implementation, not the full AI/ActivityPub/ATProto product or a production-ready deployment. The 62-test suite, fixture-backed desktop/mobile browser flows and container smoke checks pass in CI; live providers, real federation and production deployment remain unverified.
 
 The material below describes the historical root implementation, preserved for reference. Use `cd v3 && npm start` for the new prototype; do not confuse the two runtimes.
 
