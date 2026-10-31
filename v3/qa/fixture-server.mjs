@@ -1,6 +1,11 @@
 import {createApp} from '../server/app.mjs';
 const rootUri='at://did:plc:qafixture/app.bsky.feed.post/root';
 const blockedUri='at://did:plc:qafixture/app.bsky.feed.post/blocked';
+const fixtureFeed={version:'https://jsonfeed.org/version/1.1',items:[
+ {id:'qa-one',title:'Science and software fixture',content_text:'A deterministic article for browser verification. No external origin was contacted.\n\nSmall research groups are building tools that make public knowledge easier to follow. This synthetic story explores a quieter approach: clear sources, durable reading lists, and useful context beside the article.',url:'https://fixture.test/article',authors:[{name:'The Fixture Review'}],date_published:'2026-10-03T09:00:00Z'},
+ {id:'qa-two',title:'Designing a slower, more useful reading list',content_text:'This synthetic design report asks what happens when a reader has fewer panels and better typography. Short summaries help readers choose; full articles and original sources remain one deliberate action away.\n\nThe goal is not more time on screen, but a better path through the material already saved.',url:'https://fixture.test/reading-list',authors:[{name:'Design Notebook'}],date_published:'2026-10-02T09:00:00Z'},
+ {id:'qa-three',title:'How small research teams share their sources',content_text:'A synthetic science dispatch about shared reading. A useful source list records where a claim came from, why it was selected, and what is still unknown.\n\nRelated articles here are connected by their actual source or deterministic keyword tags, not an undisclosed recommendation model.',url:'https://fixture.test/research',authors:[{name:'Research Dispatch'}],date_published:'2026-10-01T09:00:00Z'}
+]};
 const app=createApp({
  dbPath:process.env.QA_DB||':memory:',
  // Browser QA is deterministic even if the calling shell has provider environment variables.
@@ -14,8 +19,14 @@ const app=createApp({
   if(url.includes('error'))throw Error('Deterministic fixture origin failure');
   if(url.includes('empty'))return {url,body:'<html>No feed links here</html>'};
   if(url.includes('website'))return {url,body:'<link rel="alternate" type="application/feed+json" title="QA discovery" href="https://fixture.test/feed.json">'};
-  return {url,body:JSON.stringify({version:'https://jsonfeed.org/version/1.1',items:[{id:'qa-one',title:'Science and software fixture',content_text:'A deterministic article for browser verification. No external origin was contacted.',url:'https://fixture.test/article',date_published:'2026-10-01T00:00:00Z'}]})};
+  return {url,body:JSON.stringify(fixtureFeed)};
  }
 });
 app.server.listen(8799,'127.0.0.1',()=>console.log('QA fixture server http://127.0.0.1:8799'));
-process.on('SIGTERM',async()=>{await app.close();process.exit(0)});
+// Separate synthetic protected node verifies token lifetime and model consent UI.
+// Its transport returns fixture output only; no provider network is possible.
+const protectedApp=createApp({token:'qa-browser-owner-token-not-a-real-secret',fetcher:async url=>({url,body:JSON.stringify(fixtureFeed)}),modelsOptions:{config:{endpoint:'https://mock-provider.invalid/v1',key:'',provider:'Synthetic QA provider — no network',classification:'fixture-classifier',embedding:'',maxRequestsPerDay:5,maxItems:5,maxInputChars:12000,maxOutputTokens:500},transport:async()=>({choices:[{message:{content:'{"labels":["Fixture"]}'}}]})}});
+const protectedSource=protectedApp.store.create('sources',{title:'Protected synthetic source',url:'https://fixture.test/feed.json',kind:'json',paused:false,share:false});
+await protectedApp.refresh(protectedSource);
+protectedApp.server.listen(8800,'127.0.0.1',()=>console.log('Protected QA fixture http://127.0.0.1:8800 (synthetic credentials only)'));
+process.on('SIGTERM',async()=>{await Promise.all([app.close(),protectedApp.close()]);process.exit(0)});

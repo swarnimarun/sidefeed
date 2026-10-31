@@ -33,3 +33,21 @@ test('synchronous search navigation and a late duplicate hash event preserve new
  assert.equal(transitionView(state,'saved'),true); // Real back/forward route changes still apply.
  assert.equal(state.query,'');
 });
+
+import {relatedEntries} from './reading-context.js';
+import {readFileSync} from 'node:fs';
+test('reading context only recommends real metadata matches and excludes unrelated/self entries',()=>{
+ const lead={id:'a',sourceId:'one',tags:['Science']};
+ const matches=relatedEntries(lead,[lead,{id:'b',sourceId:'one',tags:[]},{id:'c',sourceId:'two',tags:['Science']},{id:'d',sourceId:'three',tags:[]}]);
+ assert.deepEqual(matches.map(m=>m.item.id),['c','b']);
+ assert.equal(matches[0].reason,'Shared keyword: Science');assert.equal(matches[1].reason,'Same source');
+ assert.deepEqual(relatedEntries(null,[]),[]);
+});
+test('web templates keep all styles in CSS under the unchanged CSP',()=>{
+ for(const file of ['app.js','model-ui.js','thread-ui.js','index.html']){
+  const source=readFileSync(new URL(file,import.meta.url),'utf8');
+  assert.doesNotMatch(source,/\sstyle\s*=|<style[\s>]/i,file);
+ }
+ const source=readFileSync(new URL('app.js',import.meta.url),'utf8');
+ assert.match(source,/data-item-id=/);assert.match(source,/aria-label="Archive"/);
+});

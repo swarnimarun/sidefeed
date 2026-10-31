@@ -6,7 +6,7 @@ test('all imported web modules are served and internal files are not', async () 
  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
  const base = `http://127.0.0.1:${app.server.address().port}`;
  try {
-  for (const name of ['app.js','navigation.js','model-ui.js','thread-ui.js']) {
+  for (const name of ['app.js','navigation.js','reading-context.js','model-ui.js','thread-ui.js']) {
    const response = await fetch(`${base}/${name}`);
    assert.equal(response.status, 200, name);
    assert.match(response.headers.get('content-type'), /javascript/);
