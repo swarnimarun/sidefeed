@@ -1,8 +1,20 @@
-# Sidefeed V3 rewrite
+## V3 working prototype
 
-The new runnable prototype is in [`v3/`](v3/). Start with the [V3 run guide](docs/v3/IMPLEMENTATION.md), [architecture](docs/v3/ARCHITECTURE-PLAN.md) and [verification report](docs/v3/QA.md).
+The fresh implementation lives in [`v3/`](v3/). Node 24 supplies HTTP/SQLite; pinned bundled sax 1.6.1 supplies XML parsing with its BlueOak-1.0.0 license preserved. No `npm install` is required.
 
-Node 24 + SQLite, a rebuilt modular Commonplace × Dispatch editorial frontend, approval-gated website discovery, local publishing and trusted-node cached SSE updates. This is an early implementation, not the full AI/ActivityPub/ATProto product or a production-ready deployment. The 62-test suite, fixture-backed desktop/mobile browser flows and container smoke checks pass in CI; live providers, real federation and production deployment remain unverified.
+```sh
+cd v3
+npm start
+# http://127.0.0.1:8787
+npm test
+npm run check
+```
+
+Implemented: FTS5-ranked/fuzzy search, consented hybrid retrieval and stored-vector related reading, cited summaries and scoped local-library research, RSS 1/2/Atom/JSON feeds, public ATProto authored-feed and conservative ActivityPub outbox previews with explicit local subscription, conditional polling and opt-in bounded auto-polling. The modular editorial reader includes Sources, Threads and local-only Compose; trusted fleet transport supplies cached SSE/replay primitives.
+
+[CI](https://github.com/swarnimarun/sidefeed/actions/runs/41218120045) at `2d1d21a06bd3a0d591b6023d69e48ed74d2d9fd0` passed **124 tests, 32 syntax checks, browser flows and container smoke**. Providers/social responses were fixtures, not live account tests. Public-source subscription is not a remote Follow or authenticated social write. No production deployment, model-quality guarantee or measured hardware minimum is claimed.
+
+See [run guide](docs/v3/IMPLEMENTATION.md), [search/subscriptions](docs/v3/SEARCH-SUBSCRIPTIONS.md), [QA](docs/v3/QA.md) and [V3 index](docs/v3/README.md). Live interoperability, authenticated ActivityPub/ATProto publishing, production security, fleet failover, backup/restore and performance qualification remain required work.
 
 The material below describes the historical root implementation, preserved for reference. Use `cd v3 && npm start` for the new prototype; do not confuse the two runtimes.
 

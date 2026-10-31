@@ -1,6 +1,6 @@
 # Sidefeed V3 prototype — independent QA
 
-Verified 2026-10-31. [Fresh-frontend CI](https://github.com/swarnimarun/sidefeed/actions/runs/41214495602) at `723557df29b431041a0cb58cb657e7325285439c` passed **62 tests, 23 recursive JavaScript syntax checks, the full browser/protected-token/consent/draft/navigation suite and container smoke**. Actual desktop/mobile screenshots in artifact `13047443684` passed visual comparison against five selected-concept criteria: working masthead navigation, reading-only archive, bold serif hierarchy, 65/35 article/context layout, and phone bottom navigation with the third headline above it. This is objective comparison evidence, not pixel identity or user approval of the latest delivery. No real external provider/account call, social publication or host deployment was performed.
+Verified 2026-10-31. [Reader-feature CI](https://github.com/swarnimarun/sidefeed/actions/runs/41218120045) at `2d1d21a06bd3a0d591b6023d69e48ed74d2d9fd0` passed **124 tests, 32 syntax checks, the full browser suite and container smoke**. Artifact `13048654690` contains 20 actual screenshots; Search, fuzzy results, Ask and public ATProto/ActivityPub subscription previews were visually reviewed. All provider and social-origin responses were fixtures; no live provider/account interoperability or host deployment was tested.
 
 ## Fresh frontend scope
 
@@ -15,9 +15,9 @@ From the repository root:
 ```sh
 cd v3
 npm test
-# PASS: 62 tests (combined backend and independent suites)
+# PASS: 124 tests (combined backend and independent suites)
 npm run check
-# PASS: all server modules, web app and check runner (23 files)
+# PASS: all server modules, web app and check runner (32 files)
 node --check web/app.js
 # PASS
 ```
@@ -45,7 +45,7 @@ Node v24.22.1, built-in HTTP/SQLite; fixture fetchers replace external network. 
 
 ## Stage 2: models, thread identity and fleet privacy
 
-The combined backend, integration, model/thread, UI and reading-room regression suite has **62 passing tests**. Provider behavior uses injected fixture transports or stubbed HTTPS/DNS sockets, never actual provider calls.
+The combined backend, integration, model/thread, UI and reading-room regression suite has **124 passing tests**. Provider behavior uses injected fixture transports or stubbed HTTPS/DNS sockets, never actual provider calls.
 
 - Disabled configuration, missing confirmation/provider-specific consent, missing private-source consent, unsupported operation, duplicate IDs and nonexistent item IDs cause zero provider calls.
 - Only selected title/content enters provider request. Read/save flags, source identity and credentials are not article payload. Artifacts retain model/provider/input hash provenance; classification does not publish, create drafts, emit fleet events or execute model-suggested tools.
@@ -57,12 +57,23 @@ The combined backend, integration, model/thread, UI and reading-room regression 
 
 ## Browser and container evidence
 
-[Fresh-frontend CI](https://github.com/swarnimarun/sidefeed/actions/runs/41214495602) at `723557df29b431041a0cb58cb657e7325285439c` passed **62 tests, 23 recursive JavaScript syntax checks, the full browser/protected-token/consent/draft/navigation suite and container smoke**. Actual desktop/mobile screenshots in artifact `13047443684` passed visual comparison against five selected-concept criteria: working masthead navigation, reading-only archive, bold serif hierarchy, 65/35 article/context layout, and phone bottom navigation with the third headline above it. This is objective comparison evidence, not pixel identity or user approval of the latest delivery.
+[Reader-feature CI](https://github.com/swarnimarun/sidefeed/actions/runs/41218120045) at `2d1d21a06bd3a0d591b6023d69e48ed74d2d9fd0` passed **124 tests, 32 syntax checks, the full browser suite and container smoke**. Artifact `13048654690` contains 20 actual screenshots; Search, fuzzy results, Ask and public ATProto/ActivityPub subscription previews were visually reviewed. All provider and social-origin responses were fixtures; no live provider/account interoperability or host deployment was tested.
 
 The suite is [browser.py](../../v3/qa/browser.py), backed by [fixture-server.mjs](../../v3/qa/fixture-server.mjs). Synthetic fixtures cover reader/source/discovery, private drafts/local publication, dedicated Threads, memory-only token connect/reload/disconnect, model approval cancel/confirm and navigation. The screenshot review covers actual rendered desktop/mobile interfaces, not generated mockups. Earlier styling-only evidence does not substitute for this fresh implementation's checks.
+
+## Reader-feature checks
+
+- SQLite FTS5 ranking, phrases, Unicode, filters and stable pagination; indexed trigram/Damerau fuzzy matching includes leading typos and transpositions, under bounded candidate limits.
+- Explicitly consented query embedding/hybrid search and compatible stored-vector related results; query and content/private scopes remain distinct. No provider calls on ordinary local search.
+- Cited summaries and the bounded local-library `search`/`read_items`/`finalize` loop enforce approved source scope, request/step limits, cancellation and provenance. Citations identify supplied evidence, not verified factual entailment. No external-web search or arbitrary agent execution.
+- RSS 1 RDF/RSS 2/Atom strict namespace extraction uses pinned sax 1.6.1 with preserved BlueOak license; UTF-8, entity/DTD and resource-bound cases tested.
+- Public ATProto handle/DID authored-feed resolution and conservative public same-origin ActivityPub outbox pulls; preview/confirmation commits local subscriptions, not remote Follow or account writes.
+- Conditional ETag/Last-Modified, 304, retry backoff and optional bounded local scheduler guards; keyboard skip link preserves route and moves focus.
+
+See [search and subscriptions](SEARCH-SUBSCRIPTIONS.md) for precise capability boundaries.
 
 ## Remaining verification and product boundaries
 
 Not run: live DNS rebinding/redirect-chain integration, malformed/truncated/large upstream stress, prolonged SSE reconnect/backoff/revocation soak, multiple real VPS hosts, TLS/reverse-proxy setup, backup/restore recovery, load testing, real mobile-device/browser testing, accessibility audit. Tests use deterministic fixtures; they do not prove full RSS/Atom/XML specification coverage.
 
-This slice has lexical search/keyword tags, opt-in model classification/embedding adapters with provenance and scoped consent, bounded public thread normalization, bounded feed-link discovery, local-only publication, and trusted single-authority coordinator/consumer transport. It does not prove real-provider interoperability/quality, autonomous web discovery, signed open federation, ActivityPub delivery, ATProto publishing/firehose, complete conversation history or real-account thread interoperability, full failover/lease-renewal automation, snapshot/resync/retention, or hardened account/session auth. See server README for protocol limits. Do not represent this QA as full V3 acceptance or public-deployment approval.
+This slice has FTS5/fuzzy/hybrid retrieval, scoped model jobs and local-library research, public profile subscription previews, bounded public threads, local-only publication and trusted single-authority transport. It does not prove real-provider interoperability/quality, autonomous web discovery, signed open federation, ActivityPub delivery, ATProto publishing/firehose, complete conversation history or real-account thread interoperability, full failover/lease-renewal automation, snapshot/resync/retention, or hardened account/session auth. See server README for protocol limits. Do not represent this QA as full V3 acceptance or public-deployment approval.

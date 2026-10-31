@@ -2,9 +2,13 @@
 
 Design baseline: 2026-10-31. This document specifies the target and acceptance gates; it is not a claim that these integrations are production-ready. The first implementation slice is a Node 24 / SQLite local backend and web UI, without configured external model or publishing credentials. Preserve AI, RSS/Atom/JSON Feed and ActivityPub read/publishing scope; AT Protocol and trusted-fleet delivery are additive.
 
-## Implemented adapter slice
+## Implemented slice versus target contracts
 
-`app/server/threads.mjs` now normalizes bounded public AppView thread responses into canonical DID-keyed nodes and reply/root edges; `adapters.mjs` uses the same post normalizer for feed responses. CID edits retain item identity. Cross-author replies, blocked/not-found/missing placeholders, traversal caps and a fixed public AppView URL builder are covered by synthetic tests in `app/test/threads.test.mjs`. Every graph explicitly reports a partial AppView snapshot; this is not continuous thread following. Routes, persisted/fleet metadata and UI use this contract as separately integrated layers. No handle resolver, stream, OAuth or remote publishing is implemented by this adapter. The discovery/model and fleet target design below does not imply all controls are implemented.
+The following target contracts remain broader than the implementation. Current code supports bounded public ATProto authored-feed subscriptions with handle-to-DID AppView resolution and partial thread graphs; a conservative public same-origin ActivityPub actor/outbox subset; RSS 1/2/Atom/JSON Feed; conditional polling and opt-in bounded local scheduling. Preview then explicit confirmation creates only a local subscription—no remote Follow, OAuth account or authenticated publishing.
+
+Local FTS5/fuzzy search, consented query-embedding hybrid search, compatible stored-vector related results, cited summaries and a bounded local-library model loop are implemented. The loop has only validated `search`, `read_items`, `finalize` actions over approved source scope; no external search connector, arbitrary browser or publishing tool is enabled. Model suggestions for new external sources, open federation, authenticated social writes and fleet failover remain target work.
+
+See [SEARCH-SUBSCRIPTIONS.md](SEARCH-SUBSCRIPTIONS.md) and the [server guide](../../v3/server/README.md) for exact current limits. [CI](https://github.com/swarnimarun/sidefeed/actions/runs/41218120045) at `2d1d21a06bd3a0d591b6023d69e48ed74d2d9fd0` passed 124 tests and 32 syntax checks plus fixture browser/container checks; live interoperability is unverified.
 
 ## 1. AT Protocol: begin with public reads
 
