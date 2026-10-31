@@ -42,7 +42,7 @@ npm test
 npm run check
 ```
 
-Stage-2 local verification on Node v24.22.1: 49 tests and syntax checks for 15 files passed, including five UI-render tests and static-module route coverage. This is a local checkpoint, not remote final-commit acceptance; rerun both commands after further changes. No live model provider was called. Earlier baseline commit `75ab226` passed remote CI container-smoke; its browser run found a search-input timing failure being corrected. Require fresh-commit CI and browser results before claiming completion.
+Verified stage-2 commit `3fbbbde58b5c97ccd83f62d0fce68973a5cb8f85`: [stage-2 CI run](https://github.com/swarnimarun/sidefeed/actions/runs/41207828117) passed 49 tests, 15 syntax checks, scripted desktop/mobile browser flows (including disabled-provider and synthetic thread assertions), and container build/start/token smoke. No live model provider was called. Desktop reader/thread, mobile reader and fully loaded mobile sources screenshots were visually reviewed. See [QA evidence and limits](QA.md).
 
 Tests use Node's built-in test runner. `check` performs syntax checks on all server modules and the web application; it is not a full security audit or browser test. See the commit's verification report for observed results; listing a command here does not assert it has passed on every platform.
 
@@ -63,7 +63,7 @@ docker compose logs --tail=50
 docker compose down
 ```
 
-**Verification boundary:** Docker is unavailable in the local development environment, but remote CI container-smoke succeeded for earlier baseline commit `75ab226`. That does not validate the latest stage-2 image or an operator's Compose host. Require fresh-commit image CI plus fresh-volume startup, token rejection, UI/API smoke, persistence/recreation and non-root ownership checks. No external deployment was performed. No healthcheck is declared yet; absence of a failing probe is not evidence of readiness. Never use `docker compose down -v` unless intentional permanent data deletion is authorized.
+**Verification boundary:** [stage-2 CI run](https://github.com/swarnimarun/sidefeed/actions/runs/41207828117) at `3fbbbde58b5c97ccd83f62d0fce68973a5cb8f85` passed container build/start/token smoke. Local Docker unavailability was a historical tooling limitation, not a failure of that remote check. This does not validate every operator's Compose host, both CPU architectures, backup/restore or production readiness. Require fresh-volume persistence/recreation and non-root ownership checks on the intended host before valuable use. No external deployment was performed. No healthcheck is declared yet; absence of a failing probe is not evidence of readiness. Never use `docker compose down -v` unless intentional permanent data deletion is authorized.
 
 ## What this slice implements
 
