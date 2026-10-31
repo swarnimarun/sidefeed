@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { workspace } from './pages/workspace.js';
+const escape=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const helpers={escape,safeUrl:()=> '#',date:()=> 'Oct 31',pill:escape,heading:(a,b,c)=>`<h1>${escape(b)}</h1><p>${escape(c)}</p>`};
+const base={sources:[],runs:[],drafts:[],fleet:{},status:{},modelStatus:{},modelJobs:[],modelArtifacts:[],items:[],similar:null,thread:null,draftTitle:'',draftContent:''};
+test('all workspace routes render without invented data',()=>{for(const view of ['sources','agents','compose','threads','fleet','models','settings']){const html=workspace({...base,view},helpers);assert.match(html,/<h1>/);assert.doesNotMatch(html,/<script|style=/);}});
+test('source discovery is integrated and technical evidence collapsed',()=>{const html=workspace({...base,view:'sources',runs:[{id:'r',status:'proposed',url:'https://example.com',proposals:[{title:'<unsafe>',url:'https://example.com/rss',kind:'rss'}]}]},helpers);assert.match(html,/id="discovery-form"/);assert.match(html,/<details><summary>Inspect proposal & evidence/);assert.match(html,/data-approve="r"/);assert.match(html,/&lt;unsafe&gt;/);assert.doesNotMatch(html,/<unsafe>/);});
+test('compose escapes drafts and does not present remote publishing',()=>{const html=workspace({...base,view:'compose',draftContent:'<img onerror=x>',drafts:[{id:'d',title:'Hello',status:'draft',content:'words'}]},helpers);assert.match(html,/&lt;img onerror=x&gt;/);assert.match(html,/Save private draft/);assert.match(html,/Publish locally…/);assert.match(html,/<details class="draft-preview">/);});
+test('model provider evidence begins closed and unavailable actions disabled',()=>{const html=workspace({...base,view:'models'},helpers);assert.match(html,/<details><summary>Configured models, limits & destination/);assert.match(html,/No model calls will be made/);assert.match(html,/id="model-operation" name="operation" disabled/);});

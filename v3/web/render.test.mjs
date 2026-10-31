@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {threadPanel} from './thread-ui.js';
-import {modelPanel} from './model-ui.js';
+import {threadPanel} from './components/thread.js';
+import {modelPanel} from './components/models.js';
 const escape=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safeUrl=v=>{try{const u=new URL(v);return ['https:','http:'].includes(u.protocol)?escape(u.href):'#';}catch{return '#';}};
 const helpers={escape,safeUrl,date:()=> 'Oct 31',pill:t=>escape(t),heading:()=>'<h1>Models</h1>'};
@@ -22,17 +22,7 @@ test('model evidence and similarity values render safely with provider provenanc
  assert.match(html,/inputHash/);assert.match(html,/0\.123/);assert.match(html,/&lt;img&gt;/);assert.doesNotMatch(html,/<svg>|<img>/);
 });
 
-import {transitionView} from './navigation.js';
-test('synchronous search navigation and a late duplicate hash event preserve newer input',()=>{
- const state={view:'inbox',query:'',selected:'old',filter:'unread'};
- assert.equal(transitionView(state,'search'),true);
- state.query='not-found-xyz'; // User input after synchronous click navigation.
- assert.equal(transitionView(state,'search'),false); // queued hashchange, not a new navigation
- assert.equal(state.query,'not-found-xyz');
- assert.equal(state.selected,null);
- assert.equal(transitionView(state,'saved'),true); // Real back/forward route changes still apply.
- assert.equal(state.query,'');
-});
+test('actual modular router preserves newer search input on duplicate events and resets genuine route changes',async()=>{const {createRouter}=await import('./router.js');const old={window:globalThis.window,location:globalThis.location,history:globalThis.history};const handlers={};let loads=0;globalThis.window={addEventListener:(name,fn)=>handlers[name]=fn};globalThis.location={hash:'#inbox'};globalThis.history={pushState:(_a,_b,url)=>{location.hash=url}};try{const s={view:'inbox',query:'old',filter:'unread',sourceFilter:'s',menuOpen:true,selected:'a'};const navigate=createRouter(s,()=>loads++);navigate('search');s.query='newer input';handlers.hashchange();assert.equal(s.query,'newer input');assert.equal(loads,1);assert.equal(s.menuOpen,false);assert.equal(s.sourceFilter,'');location.hash='#saved';handlers.popstate();assert.equal(s.view,'saved');assert.equal(s.query,'');assert.equal(loads,2);}finally{for(const key of Object.keys(old)){if(old[key]===undefined)delete globalThis[key];else globalThis[key]=old[key]}}});
 
 import {relatedEntries} from './reading-context.js';
 import {readFileSync} from 'node:fs';
@@ -44,10 +34,9 @@ test('reading context only recommends real metadata matches and excludes unrelat
  assert.deepEqual(relatedEntries(null,[]),[]);
 });
 test('web templates keep all styles in CSS under the unchanged CSP',()=>{
- for(const file of ['app.js','model-ui.js','thread-ui.js','index.html']){
+ for(const file of ['app.js','components/shell.js','pages/reader.js','pages/workspace.js','components/models.js','components/thread.js','index.html']){
   const source=readFileSync(new URL(file,import.meta.url),'utf8');
   assert.doesNotMatch(source,/\sstyle\s*=|<style[\s>]/i,file);
  }
- const source=readFileSync(new URL('app.js',import.meta.url),'utf8');
- assert.match(source,/data-item-id=/);assert.match(source,/aria-label="Archive"/);
+ assert.match(readFileSync(new URL('pages/reader.js',import.meta.url),'utf8'),/data-item-id=/);assert.match(readFileSync(new URL('components/shell.js',import.meta.url),'utf8'),/aria-label="Archive"/);
 });
