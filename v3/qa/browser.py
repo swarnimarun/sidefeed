@@ -175,8 +175,11 @@ with sync_playwright() as p:
  lead.get_by_text('Related & source details',exact=False).click()
  expect(lead.get_by_role('heading',name='Source provenance',exact=True)).to_be_hidden()
  page.evaluate('window.scrollTo(0, 0)')
- third_heading=page.locator('article.story h2').nth(2).bounding_box()
+ expect(page.locator('article.story > h2')).to_have_count(3)
+ capture(page,'mobile-reader.png')
+ third_heading=page.locator('article.story > h2').nth(2).bounding_box()
  bottom_navigation=page.locator('.bottom-nav').bounding_box()
+ print(json.dumps({'mobileThirdHeadline':third_heading,'mobileNavigation':bottom_navigation}))
  assert third_heading and bottom_navigation and third_heading['y']+third_heading['height'] <= bottom_navigation['y']-8, 'Third mobile headline hidden behind bottom navigation'
  capture(page,'mobile-reader.png')
  assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile horizontal overflow'
