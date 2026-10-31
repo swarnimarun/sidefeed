@@ -30,6 +30,17 @@ def open_advanced_source(page):
  expect(disclosure).to_have_attribute('open','')
  expect(page.get_by_label('Website URL',exact=True)).to_be_visible()
 
+def check_skip_link(browser):
+ tab=browser.new_page(viewport={'width':1440,'height':1000})
+ tab.goto('http://127.0.0.1:8799/#search')
+ expect(tab.get_by_role('heading',name='Search your library',exact=True)).to_be_visible()
+ tab.keyboard.press('Tab')
+ expect(tab.get_by_role('link',name='Skip to content',exact=True)).to_be_focused()
+ tab.keyboard.press('Enter')
+ expect(tab.locator('#main')).to_be_focused()
+ assert tab.url.endswith('#search'), 'Skip link changed the active route'
+ tab.close()
+
 def check_protected_model_flow(browser):
  # Synthetic second node: fixture-labeled screenshots; no real secrets, network or billing.
  token='qa-browser-owner-token-not-a-real-secret'
@@ -118,6 +129,7 @@ def check_public_profile_previews(page):
 
 with sync_playwright() as p:
  browser=p.chromium.launch(headless=True)
+ check_skip_link(browser)
  page=browser.new_page(viewport={'width':1440,'height':1000}); errors=[]; requests=[];page.on('pageerror',lambda e:errors.append(str(e)));page.on('request',lambda r:requests.append((r.method,r.url)))
  page.goto('http://127.0.0.1:8799');expect(page.get_by_role('heading',name='Your reading starts here')).to_be_visible();capture(page,'desktop-empty.png')
  navigate(page,'sources');open_advanced_source(page);page.get_by_text('I already have the feed URL',exact=True).click();page.get_by_label('Feed URL',exact=True).fill('https://fixture.test/feed.json');page.get_by_label('Publication name',exact=True).fill('QA source');page.get_by_label('Feed format',exact=True).select_option('json');page.get_by_role('button',name='Subscribe',exact=True).click();expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()

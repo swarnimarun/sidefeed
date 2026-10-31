@@ -40,3 +40,20 @@ test('web templates keep all styles in CSS under the unchanged CSP',()=>{
  }
  assert.match(readFileSync(new URL('pages/reader.js',import.meta.url),'utf8'),/data-item-id=/);assert.match(readFileSync(new URL('components/shell.js',import.meta.url),'utf8'),/aria-label="Archive"/);
 });
+test('skip link remains keyboard-focusable and clipped until focus rather than offscreen',()=>{
+ const css=readFileSync(new URL('styles.css',import.meta.url),'utf8');
+ const hidden=css.match(/\.skip\{([^}]+)\}/)?.[1]||'';
+ const focused=css.match(/\.skip:focus\{([^}]+)\}/)?.[1]||'';
+ assert.match(hidden,/clip-path:inset\(50%\)/);assert.match(hidden,/width:1px/);assert.match(hidden,/height:1px/);assert.match(hidden,/overflow:hidden/);
+ assert.doesNotMatch(hidden,/display:none|visibility:hidden|top:-/);
+ assert.match(focused,/clip-path:none/);assert.match(focused,/width:auto/);assert.match(focused,/height:auto/);
+ const index=readFileSync(new URL('index.html',import.meta.url),'utf8');assert.match(index,/<a class="skip" href="#main">Skip to content<\/a>/);
+ const shell=readFileSync(new URL('components\/shell.js',import.meta.url),'utf8');assert.match(shell,/<main id="main" tabindex="-1"/);
+});
+
+test('skip action bypasses routing and focuses main without changing the active page',()=>{
+ const app=readFileSync(new URL('app.js',import.meta.url),'utf8');
+ assert.match(app,/a\[href\^="#"\]:not\(\.skip\)/);
+ const action=app.match(/function skipToContent\(event\)\{([^}]+)\);\}/)?.[1]||app.split('function skipToContent(event){')[1]?.split('function bind(){')[0]||'';
+ assert.match(action,/event\.preventDefault\(\)/);assert.match(action,/main\?\.focus\(\)/);assert.doesNotMatch(action,/navigate|location\.hash|pushState/);
+});

@@ -39,8 +39,10 @@ async function mutate(path,body,message,method='POST'){
  try{const response=await api(path,{method,body});if(method==='PATCH'&&path.startsWith('/items/')){state.extraItems||={};state.extraItems[response.id]=response;}if(path==='/drafts'||(method==='PATCH'&&path.startsWith('/drafts/'))){state.draftTitle='';state.draftContent='';state.editDraft=null;state.draftDirty=false;}toast(message);await load();}
  catch(error){state.error=error.message;toast(error.message);}finally{state.busy=false;render();}
 }
+function skipToContent(event){event.preventDefault();const main=$('#main');main?.focus();main?.scrollIntoView({block:'start'});}
 function bind(){
- document.querySelectorAll('a[href^="#"]').forEach(a=>a.onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();navigate(a.hash.slice(1));});
+ $('.skip')?.addEventListener('click',skipToContent);
+ document.querySelectorAll('a[href^="#"]:not(.skip)').forEach(a=>a.onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();navigate(a.hash.slice(1));});
  document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>navigate(b.dataset.nav));
  $('[data-action="menu"]')?.addEventListener('click',()=>{state.menuOpen=!state.menuOpen;render();$('[data-action="menu"]').focus();});
  document.querySelectorAll('[data-archive]').forEach(b=>b.onclick=()=>{state.navigationEpoch=(state.navigationEpoch||0)+1;state.threadLoading=false;state.view='inbox';state.filter=b.dataset.archive;state.sourceFilter='';state.query='';state.selected=null;state.menuOpen=false;history.pushState(null,'','#inbox');load();});
