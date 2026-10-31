@@ -5,6 +5,7 @@ def capture(page, filename):
  # Never deliver a navigation/loading frame as a completed screen.
  expect(page.locator('#main')).to_be_visible()
  expect(page.locator('.loading')).to_have_count(0)
+ expect(page.locator('#toast')).to_have_text('',timeout=7000)
  page.screenshot(path=os.path.join(out,filename),full_page=True)
 def check_protected_model_flow(browser):
  # Synthetic second node: no screenshots, real secrets, external requests or billing.
@@ -155,6 +156,9 @@ with sync_playwright() as p:
  expect(lead.get_by_role('heading',name='Source provenance',exact=True)).to_be_visible()
  expect(lead.get_by_role('link',name='View original feed ↗',exact=True)).to_have_attribute('href','https://fixture.test/feed.json')
  expect(page.locator('article.article')).to_have_count(3)
+ capture(page,'mobile-reader-context.png')
+ lead.get_by_text('Related & source details',exact=True).click()
+ expect(lead.get_by_role('heading',name='Source provenance',exact=True)).to_be_hidden()
  capture(page,'mobile-reader.png')
  assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile horizontal overflow'
  menu.click();expect(menu).to_have_attribute('aria-expanded','true')
