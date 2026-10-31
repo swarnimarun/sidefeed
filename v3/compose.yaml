@@ -1,0 +1,31 @@
+services:
+  sidefeed:
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+      SIDEFEED_DB: /data/sidefeed.sqlite
+      SIDEFEED_TOKEN: ${SIDEFEED_TOKEN:?Set SIDEFEED_TOKEN to a random value of at least 24 characters}
+    volumes:
+      - sidefeed-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  sidefeed-data:

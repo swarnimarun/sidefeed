@@ -1,0 +1,96 @@
+# Sidefeed V3: run the first working slice
+
+This is a ground-up local prototype, not the completed V3 product or a production deployment. The implementation lives in repository directory `v3/`; the architecture and procedural plans live in `docs/v3/`. V1 and the older `v2` branch are not replaced.
+
+## Requirements and native run
+
+Node.js 24 or newer is required for built-in SQLite. There are no third-party runtime dependencies and no `npm install` step. SQLite may print an experimental-feature warning on the selected Node release.
+
+From the repository root:
+
+```sh
+cd v3
+npm start
+```
+
+Open **http://127.0.0.1:8787**. Default binding is loopback; without a configured token this is a single-owner, trusted-local-machine mode, not protection against other users/processes on the same machine. Stop with Ctrl-C. Data defaults to `v3/data/sidefeed.sqlite` and survives restarts.
+
+| Setting | Default | Behavior |
+|---|---|---|
+| `HOST` | `127.0.0.1` | Non-loopback binding requires a token of at least 24 characters |
+| `PORT` | `8787` | HTTP port |
+| `SIDEFEED_DB` | `data/sidefeed.sqlite` | SQLite path, relative to working directory unless absolute |
+| `SIDEFEED_TOKEN` | unset | When set, owner API calls require `Authorization: Bearer <token>`; peer transport uses separately granted credentials |
+
+The native server does not automatically load `.env`. Set environment variables in the launching shell or your service manager. Generate a secret rather than copying an example:
+
+```sh
+export SIDEFEED_TOKEN="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
+npm start
+```
+
+In the web UI, choose **Connect** and enter the owner token (the form also appears after a 401 response). The token stays in page memory only; reloading requires reconnecting. **Disconnect** clears the token and private view/editor data.
+
+Store the token in a password manager or protected service configuration, not source control or logs. A token does not encrypt HTTP. Do not expose the process directly to the internet; remote use requires TLS and additional security/operational review.
+
+## Checks
+
+Run from `v3/`:
+
+```sh
+npm test
+npm run check
+```
+
+Observed on Node v24.22.1 during preparation: `npm test` passed all 19 tests and `npm run check` passed. The tests covered persistence/ingest/local publishing, approval-gated discovery, trusted peer grants/leases/revocation, URL/parser security and ATProto IDs, origin/host/content-type/token handling, and two-node cached SSE replay. These results do not replace final-commit revalidation.
+
+Tests use Node's built-in test runner. `check` performs syntax checks on all server modules and the web application; it is not a full security audit or browser test. See the commit's verification report for observed results; listing a command here does not assert it has passed on every platform.
+
+## Container packaging
+
+The Dockerfile uses the official `node:24-bookworm-slim` image and runs as the non-root `node` user (UID 1000). Its data volume is `/data`; the image initializes ownership for a new named volume. Existing/bind-mounted directories require matching write permissions. The image tag is not digest-pinned yet: record/pin a validated digest before release.
+
+The Compose file requires `SIDEFEED_TOKEN`, publishes only `127.0.0.1:8787`, uses a read-only root filesystem, drops capabilities and rotates logs. The server listens on all interfaces **inside the container**, so its minimum-24-character token check applies even though the host port is loopback-only. An empty token fails Compose interpolation; a short token fails application startup.
+
+After generating/exporting a token as above, the intended local container workflow is:
+
+```sh
+# From v3/, on a host with Docker and Compose installed:
+docker compose build
+docker compose up -d
+docker compose logs --tail=50
+# Stop without deleting stored data:
+docker compose down
+```
+
+**Container build and runtime are unverified:** Docker was unavailable during preparation. No container image was built, no Compose deployment was started and no remote infrastructure was changed. Run fresh-volume startup, token rejection, UI/API smoke, persistence/recreation and non-root ownership tests before treating this packaging as validated. No healthcheck is declared yet; absence of a failing probe is not evidence of application readiness. Never use `docker compose down -v` unless intentional permanent data deletion is authorized.
+
+## What this slice implements
+
+The authoritative runtime summary is `GET /api/v3/status` (owner token required if configured).
+
+- Local SQLite-backed sources, items, read/saved state, named feeds and lexical search; RSS/Atom/JSON input and a read-only ATProto-shaped JSON adapter.
+- On-demand source refresh and bounded URL fetching. No continuously running full fleet poll scheduler is implied.
+- Deterministic website feed discovery with human approval before subscription; keyword tagging. These are not model-driven agents, AI classification or semantic embeddings.
+- Local drafts and explicit local publishing, with published posts exposed at `/public/feed.json`. This endpoint is intentionally public: any party able to reach the server can read published posts even if owner API authentication is enabled. It does not send posts to ActivityPub or ATProto.
+- Trusted-peer source grants, coordinator-local leases with epochs, credential revocation, cached event replay, authenticated SSE deltas and acknowledgments. `npm run fleet:receive` runs the receiver CLI with `SIDEFEED_COORDINATOR`, `SIDEFEED_PEER_TOKEN`, `SIDEFEED_SOURCE_MAP` (JSON remote-to-existing-local source IDs) and `SIDEFEED_DB`; use HTTPS except on loopback and manually pause mapped local sources to avoid independent polling. See [server configuration and API guide](../../v3/server/README.md) for exact setup and limitations. The receiver persists its cursor and reconnects. A controlled test covers cached SSE delivery to a second node and idempotent replay. These are protocol primitives, not a deployed autonomous multi-node push mesh, quorum failover or a guarantee of globally unique origin polling. Already-in-flight origin requests can overlap failover despite fencing stale results.
+- A local web interface with empty states. An explicit demo API can load labeled fixtures; it does not fetch news or connect to a live federation network.
+
+Use only trusted test data while evaluating. Do not infer production readiness, third-party protocol interoperability or measured cheap-host capacity from this first slice.
+
+## Data safety now
+
+No backup/restore CLI is shipped in this slice. Before valuable use, stop every writer and take a consistent copy of the **whole data directory**, including any SQLite WAL sidecars. Do not copy only a live database file. Protect the backup as sensitive data; it includes private content and credential-related state. Restore to a separate volume/path and verify it privately before replacing an installation. Restore must not reactivate stale fleet ownership or replay external publication; those recovery workflows need implementation and tests before live federation. Automated backup, schema migration compatibility and rollback guarantees remain backlog work.
+
+## Required V3 completion backlog
+
+These remain required product scope; implementation stages do not remove them:
+
+1. Complete and harden feed management: robust parsing/discovery, OPML roundtrip, organization, full lifecycle semantics, scheduling/backoff, retention, authenticated reading and private/public boundaries.
+2. AI classification, embeddings, semantic search and suggestions: durable bounded jobs, model/version provenance, budgets, explicit remote-data consent, local/remote provider profiles, retries and reindexing.
+3. Networked readers and trusted fleets: autonomous polling workers, explicit source-sharing consent, normally one lease-authorized poll initiator per cohort, durable push/subscription delivery, gap recovery, failover/partition tests, peer lifecycle and observable queues.
+4. Publishing/microblogging: author/visibility controls, durable outbox, media quotas, edits/deletes, stable identity, delivery status and recovery-safe retries.
+5. Bidirectional ActivityPub: discovery, follow/accept/undo, inbox/outbox, create/update/delete, authenticated signatures, audience enforcement, abuse controls and tested interoperability. Not active in this slice.
+6. ATProto: deliberate reader/discovery integration beyond the JSON adapter, authenticated account/publishing flows, stream/firehose or supported sync strategy, moderation/identity validation and protocol interoperability. Not implemented by accepting ATProto-shaped JSON alone.
+7. Agent discovery/harness: scoped tools, explicit human approval, provenance, budgets, auditable runs, prompt-injection boundaries and safe source/network proposals. Deterministic discovery is an initial tool, not autonomous AI capability.
+8. Operations: verified amd64/arm64 images, CI/browser/security gates, backup/restore and migration drills, controlled multi-node/federation test rigs, resource measurements and an explicitly authorized deployment. Cheap-VPS/home-server sizing remains a target, not a measured guarantee.

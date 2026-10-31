@@ -10,9 +10,13 @@ The `v3` branch starts from verified main commit `115d6d03fbb4f4929eadd9b9f3e2a6
 
 Complete product loop: install → import/subscribe → coordinate ingestion → classify/index → read/search/save/recommend → compose/publish/share → receive social updates → backup/restore/upgrade.
 
-## Proposed stack and module boundaries
+## Implementation decision
 
-**Proposed, not dependency-validated:** Rust/Tokio/Axum for the new backend; SQLite WAL/FTS5 with versioned SQL migrations; SolidJS/TypeScript/Vite for the embedded web application; a database-backed job queue and transactional outbox; local media storage. Reusing languages/libraries is not reusing V1 implementation. Ratify concrete versions and license/security/MSRV compatibility during M0. One service, local database and media directory is the compact baseline—no mandatory Redis, Postgres, broker, cloud account or GPU. Heavy inference may run in an explicitly enabled worker or remote provider.
+The first executable slice uses Node 24 built-in HTTP/SQLite and vanilla browser JavaScript, with no third-party runtime dependencies. This supersedes the initial Rust/Solid stack proposal for this slice; it does not reduce the full product scope below. See [implementation status](IMPLEMENTATION.md) and [QA](QA.md). A future stack change requires an explicit decision, not an assumed port.
+
+## Initial stack proposal and module boundaries
+
+**Historical proposal, not selected for the current executable slice:** Rust/Tokio/Axum for the new backend; SQLite WAL/FTS5 with versioned SQL migrations; SolidJS/TypeScript/Vite for the embedded web application; a database-backed job queue and transactional outbox; local media storage. Reusing languages/libraries is not reusing V1 implementation. Ratify concrete versions and license/security/MSRV compatibility during M0. One service, local database and media directory is the compact baseline—no mandatory Redis, Postgres, broker, cloud account or GPU. Heavy inference may run in an explicitly enabled worker or remote provider.
 
 Modules with explicit domain interfaces:
 

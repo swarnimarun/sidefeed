@@ -1,3 +1,13 @@
+# Sidefeed V3 rewrite
+
+The new runnable prototype is in [`v3/`](v3/). Start with the [V3 run guide](docs/v3/IMPLEMENTATION.md), [architecture](docs/v3/ARCHITECTURE-PLAN.md) and [verification report](docs/v3/QA.md).
+
+Node 24 + SQLite, real web UI, approval-gated website discovery, local publishing and trusted-node cached SSE updates. This is an early implementation, not the full AI/ActivityPub/ATProto product or a production-ready deployment. Browser and container validation remain outstanding.
+
+The material below describes the historical root implementation, preserved for reference. Use `cd v3 && npm start` for the new prototype; do not confuse the two runtimes.
+
+---
+
 # sidefeed
 
 Sidefeed is a lightweight Rust service that turns RSS, Atom, JSON Feed, and

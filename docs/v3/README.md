@@ -1,4 +1,4 @@
-# Sidefeed V3 rewrite plan
+# Sidefeed V3: rewrite plan and first implementation
 
 V3 is a ground-up, self-hostable feed-management, reading and publishing system for inexpensive VPSs and home servers.
 
@@ -13,6 +13,10 @@ V3 is a ground-up, self-hostable feed-management, reading and publishing system 
 
 These capabilities are required V3 scope. Milestones sequence the work; they do not remove features from the product.
 
+## Runnable first slice
+
+The new implementation lives in [`v3/`](../../v3/), using Node 24 built-in HTTP/SQLite and a dependency-light web UI. Start with the [run guide](IMPLEMENTATION.md), [verification report](QA.md) and [ATProto/agent/fleet contracts](INTEGRATIONS.md). Nineteen automated tests pass; browser and container validation remain blocked/unrun. AI models, full social federation and production readiness are not claimed.
+
 ## Read in this order
 
 1. [Architecture and implementation plan](ARCHITECTURE-PLAN.md): proposed architecture, domain contracts, security, milestones and acceptance gates.
@@ -24,6 +28,6 @@ These capabilities are required V3 scope. Milestones sequence the work; they do 
 
 The `v3` branch starts at `115d6d03fbb4f4929eadd9b9f3e2a65e472f1bf5`. Existing `main` and the older `v2` prototype are preserved. The source tree currently contains the historical implementation; adding this plan does not turn it into the V3 rewrite.
 
-This is the planning baseline. No V3 application code, executable CI, deployment image or production rollout is claimed complete. Implementation will replace the historical runtime deliberately, preserving history, attribution and an explicit data-export/import path. No destructive pruning, old PR closure or live publication is implied by this planning commit.
+The first executable slice is now in `v3/`; the historical root runtime remains a reference. This is not the complete V3 release. No production rollout or validated container image is claimed. Implementation replaces the historical runtime deliberately, preserving history, attribution and an explicit data-export/import path. No destructive pruning, old PR closure or external social publication has been performed.
 
 Deployment host, domain/exposure, provider credentials and any spending remain to be selected. Resource sizes in these documents are test targets, not proven minimums. Actual deployment and release require verification of the exact source commit and image digest.
