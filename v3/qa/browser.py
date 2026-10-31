@@ -73,7 +73,7 @@ with sync_playwright() as p:
  page=browser.new_page(viewport={'width':1440,'height':1000}); errors=[]; requests=[];page.on('pageerror',lambda e:errors.append(str(e)));page.on('request',lambda r:requests.append((r.method,r.url)))
  page.goto('http://127.0.0.1:8799');expect(page.get_by_role('heading',name='Your reading starts here')).to_be_visible();capture(page,'desktop-empty.png')
  navigate(page,'sources');page.get_by_text('I already have the feed URL',exact=True).click();page.get_by_label('Feed URL',exact=True).fill('https://fixture.test/feed.json');page.get_by_label('Publication name',exact=True).fill('QA source');page.get_by_label('Feed format',exact=True).select_option('json');page.get_by_role('button',name='Subscribe',exact=True).click();expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()
- page.get_by_text('Source controls & fetch history',exact=True).click();page.get_by_role('button',name='Fetch now',exact=True).click();expect(page.get_by_role('status')).to_contain_text('Feed fetch completed')
+ page.get_by_text('Source controls & fetch history',exact=True).click();page.get_by_role('button',name='Fetch now',exact=True).click();expect(page.locator('#toast')).to_contain_text('Feed fetch completed')
  expect(page.get_by_role('heading',name='Sources',exact=True)).to_be_visible()
  expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()
  expect(page.get_by_role('heading',name='QA source',exact=True)).to_be_visible()
