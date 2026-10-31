@@ -40,6 +40,6 @@ with sync_playwright() as p:
  page.screenshot(path=out+'/desktop-thread-partial.png',full_page=True)
  page.get_by_role('button',name='← Back to stories',exact=True).click()
  page.set_viewport_size({'width':390,'height':844});page.screenshot(path=out+'/mobile-reader.png',full_page=True);assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile horizontal overflow'
- page.get_by_role('link',name='Feeds & discovery').click();page.screenshot(path=out+'/mobile-sources.png',full_page=True);assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile sources horizontal overflow'
+ page.get_by_role('link',name='Feeds & discovery').click();expect(page.get_by_role('heading',name='Add a feed',exact=True)).to_be_visible();expect(page.get_by_label('Feed URL',exact=True)).to_be_visible();page.screenshot(path=out+'/mobile-sources.png',full_page=True);assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile sources horizontal overflow'
  assert not errors,errors
  print(json.dumps({'result':'PASS','pageerrors':errors,'screenshots':os.listdir(out)}));browser.close()
