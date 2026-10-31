@@ -1,0 +1,61 @@
+name: Sidefeed V3 checks
+on:
+  push:
+    branches: [v3]
+    paths: ['v3/**', '.github/workflows/v3-ci.yml']
+  pull_request:
+    paths: ['v3/**', '.github/workflows/v3-ci.yml']
+permissions:
+  contents: read
+concurrency:
+  group: v3-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  unit-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: v3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.1'
+      - run: npm run check && npm test
+      - name: Install isolated browser test tooling
+        run: |
+          python3 -m venv /tmp/sidefeed-browser
+          /tmp/sidefeed-browser/bin/pip install playwright==1.62.0
+          /tmp/sidefeed-browser/bin/playwright install --with-deps chromium
+      - name: Test fixture-backed desktop and mobile flows
+        run: |
+          node qa/fixture-server.mjs > /tmp/sidefeed-fixture.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; cat /tmp/sidefeed-fixture.log' EXIT
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8799/api/v3/status >/dev/null; then break; fi
+            sleep 1
+          done
+          /tmp/sidefeed-browser/bin/python qa/browser.py
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build and test disposable local container
+        run: |
+          docker build -t sidefeed-v3-test ./v3
+          docker run -d --name sidefeed-v3-test -p 127.0.0.1:8787:8787 -e SIDEFEED_TOKEN=ci-fixture-only-not-a-real-secret sidefeed-v3-test
+          trap 'docker logs sidefeed-v3-test; docker rm -f sidefeed-v3-test' EXIT
+          for i in $(seq 1 30); do
+            if curl --fail --silent -H 'Authorization: Bearer ci-fixture-only-not-a-real-secret' http://127.0.0.1:8787/api/v3/status >/tmp/status.json; then break; fi
+            sleep 1
+          done
+          cat /tmp/status.json
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/api/v3/status)" = 401
+          curl --fail --silent -H 'Authorization: Bearer ci-fixture-only-not-a-real-secret' http://127.0.0.1:8787/api/v3/status | python3 -c 'import json,sys; assert json.load(sys.stdin)["name"] == "Sidefeed V3"'

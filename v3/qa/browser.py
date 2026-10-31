@@ -2,7 +2,7 @@ import json, os
 from playwright.sync_api import sync_playwright, expect
 out=os.path.join(os.path.dirname(__file__),'screenshots');os.makedirs(out,exist_ok=True)
 with sync_playwright() as p:
- browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+ browser=p.chromium.launch(headless=True)
  page=browser.new_page(viewport={'width':1440,'height':1000}); errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
  page.goto('http://127.0.0.1:8799');expect(page.get_by_role('heading',name='Make room for good reading')).to_be_visible();page.screenshot(path=out+'/desktop-empty.png',full_page=True)
  page.get_by_role('link',name='Feeds & discovery').click();page.get_by_label('Feed URL',exact=True).fill('https://fixture.test/feed.json');page.get_by_label('Name',exact=True).fill('QA source');page.get_by_label('Format',exact=True).select_option('json');page.get_by_role('button',name='+ Subscribe',exact=True).click();expect(page.get_by_text('Your sources (1)',exact=True)).to_be_visible()
