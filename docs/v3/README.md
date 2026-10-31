@@ -15,7 +15,7 @@ These capabilities are required V3 scope. Milestones sequence the work; they do 
 
 ## Runnable first slice
 
-The new implementation lives in [`v3/`](../../v3/), using Node 24 built-in HTTP/SQLite and a dependency-light web UI. Start with the [run guide](IMPLEMENTATION.md), [verification report](QA.md) and [ATProto/agent/fleet contracts](INTEGRATIONS.md). Nineteen automated tests pass; browser and container validation remain blocked/unrun. AI models, full social federation and production readiness are not claimed.
+The new implementation lives in [`v3/`](../../v3/), using Node 24 built-in HTTP/SQLite and a dependency-light web UI. Start with the [run guide](IMPLEMENTATION.md), [verification report](QA.md) and [ATProto/agent/fleet contracts](INTEGRATIONS.md). Forty-nine automated tests pass locally. Opt-in model jobs and partial ATProto thread snapshots are implemented with fixture coverage. Initial CI container smoke passed; a browser search regression was found and fixed, with fresh end-to-end verification pending. Live model/provider quality, full social federation and production readiness are not claimed.
 
 ## Read in this order
 

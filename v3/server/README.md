@@ -27,3 +27,23 @@ Loopback mode has Host allowlisting and same-origin/JSON mutation checks. Remote
 All source and agent network requests use one HTTP(S) fetcher: credential-free URLs, private address rejection, DNS address pinning, redirect revalidation, response/body/time caps, no decompression. The parser is intentionally a bounded RSS/Atom/JSON/ATProto adapter rather than a full XML implementation; DTDs/entities rejected; output rendered as plain text. It is not a full RSS specification validator. Native RSS RDF and malformed XML coverage remain pending.
 
 Keyword tagging is deterministic, not model classification or embeddings. Agent runs only extract feed discovery links from a supplied public website and require approval before subscribing; no browser, search engine, remote model, arbitrary execution or autonomous publishing.
+
+## Opt-in model provider (fixture-tested)
+
+Set these **server-side only** to enable an OpenAI-compatible provider:
+
+- `SIDEFEED_MODEL_ENDPOINT`: HTTPS base endpoint, e.g. `https://provider.example/v1` (no credentials/query in URL).
+- `SIDEFEED_MODEL_KEY`: secret bearer credential, never returned to browser or stored in SQLite.
+- `SIDEFEED_MODEL_PROVIDER`: human-readable consent identity (default `configured-provider`).
+- `SIDEFEED_CLASSIFICATION_MODEL`, `SIDEFEED_EMBEDDING_MODEL`: explicit model IDs; each operation unavailable if its ID is absent.
+- `SIDEFEED_MODEL_DAILY_REQUESTS`: daily reserved request cap (default 20, maximum 1000).
+
+No provider is enabled by default; adding sources never invokes one. Owner POST `/api/v3/models/jobs` with operation `classify` or `embed`, 1–5 itemIds, `confirm:true`, and `consent:{provider:STATUS_PROVIDER,sendContent:true,includePrivate:true}` explicitly approves title/content export. Separate `includePrivate` consent is required unless all selected sources explicitly enable sharing. GET `/models/status` discloses provider, endpoint, models, caps and billing caveat. Jobs and artifacts persist with selected IDs, content hashes, consent, requested and actual model identity, dimensions and provenance. Structured output validation rejects malformed labels/vectors; model text never becomes a command or executable tool call.
+
+Jobs run asynchronously and expose queued/running/succeeded/failed/canceled states. POST `/models/jobs/{id}/cancel` aborts current transport. Partial completed artifacts remain visible; cancel cannot recall content or guarantee no charge. Restart marks unfinished work failed with uncertain remote outcome. **No automatic paid retry.** An owner may submit a new explicitly consented job. Daily reservations include failed/canceled jobs conservatively.
+
+Limits are request count, 12,000 input characters per item, 500 requested classification output tokens, bounded response bytes and deadlines—not currency-cost accounting. Provider usage is retained if returned. No pricing lookup, dollar-budget guarantee, local model runner, source suggestions, or arbitrary agent model tools are implemented. Model-generated feed suggestions are not implemented in this slice and remain required V3 backlog; deterministic discovery proposals still require separate approval.
+
+POST `/models/similar` with `{itemId,limit}` computes cosine similarity locally only after real provider embeddings exist. It excludes changed-content artifacts and incompatible requested/actual model/provider/endpoint/dimensions. No synthetic embedding fallback. GET `/models/artifacts` returns current stored artifacts; `/models/jobs` lists jobs.
+
+Provider POST transport pins public DNS, requires HTTPS and rejects every redirect (credentials never forwarded). Test suite uses fixture transports only; live-provider interoperability and billing have **not** been tested.

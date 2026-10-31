@@ -2,6 +2,10 @@
 
 Design baseline: 2026-10-31. This document specifies the target and acceptance gates; it is not a claim that these integrations are production-ready. The first implementation slice is a Node 24 / SQLite local backend and web UI, without configured external model or publishing credentials. Preserve AI, RSS/Atom/JSON Feed and ActivityPub read/publishing scope; AT Protocol and trusted-fleet delivery are additive.
 
+## Implemented adapter slice
+
+`app/server/threads.mjs` now normalizes bounded public AppView thread responses into canonical DID-keyed nodes and reply/root edges; `adapters.mjs` uses the same post normalizer for feed responses. CID edits retain item identity. Cross-author replies, blocked/not-found/missing placeholders, traversal caps and a fixed public AppView URL builder are covered by synthetic tests in `app/test/threads.test.mjs`. Every graph explicitly reports a partial AppView snapshot; this is not continuous thread following. Routes, persisted/fleet metadata and UI use this contract as separately integrated layers. No handle resolver, stream, OAuth or remote publishing is implemented by this adapter. The discovery/model and fleet target design below does not imply all controls are implemented.
+
 ## 1. AT Protocol: begin with public reads
 
 Use the Bluesky AppView for application feeds: `app.bsky.feed.getAuthorFeed` for an actor, `getFeed` for a generator URI, and `getPostThread` for a post. Most public reads can use `https://public.api.bsky.app` without credentials. Authenticated requests route via the user's PDS, not blindly to the public host. An AppView is an indexed application view, not a repository or a generic feed generator. [Official API routing](https://docs.bsky.app/docs/api/app-bsky-feed-get-feed)

@@ -40,6 +40,14 @@ jobs:
             sleep 1
           done
           /tmp/sidefeed-browser/bin/python qa/browser.py
+      - name: Retain fixture-only browser evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: v3-browser-fixtures
+          path: v3/qa/screenshots/
+          if-no-files-found: ignore
+          retention-days: 7
   container-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15

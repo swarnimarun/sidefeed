@@ -1,4 +1,4 @@
-# Sidefeed V3: run the first working slice
+# Sidefeed V3: run the working prototype
 
 This is a ground-up local prototype, not the completed V3 product or a production deployment. The implementation lives in repository directory `v3/`; the architecture and procedural plans live in `docs/v3/`. V1 and the older `v2` branch are not replaced.
 
@@ -42,7 +42,7 @@ npm test
 npm run check
 ```
 
-Observed on Node v24.22.1 during preparation: `npm test` passed all 19 tests and `npm run check` passed. The tests covered persistence/ingest/local publishing, approval-gated discovery, trusted peer grants/leases/revocation, URL/parser security and ATProto IDs, origin/host/content-type/token handling, and two-node cached SSE replay. These results do not replace final-commit revalidation.
+Stage-2 local verification on Node v24.22.1: 49 tests and syntax checks for 15 files passed, including five UI-render tests and static-module route coverage. This is a local checkpoint, not remote final-commit acceptance; rerun both commands after further changes. No live model provider was called. Earlier baseline commit `75ab226` passed remote CI container-smoke; its browser run found a search-input timing failure being corrected. Require fresh-commit CI and browser results before claiming completion.
 
 Tests use Node's built-in test runner. `check` performs syntax checks on all server modules and the web application; it is not a full security audit or browser test. See the commit's verification report for observed results; listing a command here does not assert it has passed on every platform.
 
@@ -63,20 +63,41 @@ docker compose logs --tail=50
 docker compose down
 ```
 
-**Container build and runtime are unverified:** Docker was unavailable during preparation. No container image was built, no Compose deployment was started and no remote infrastructure was changed. Run fresh-volume startup, token rejection, UI/API smoke, persistence/recreation and non-root ownership tests before treating this packaging as validated. No healthcheck is declared yet; absence of a failing probe is not evidence of application readiness. Never use `docker compose down -v` unless intentional permanent data deletion is authorized.
+**Verification boundary:** Docker is unavailable in the local development environment, but remote CI container-smoke succeeded for earlier baseline commit `75ab226`. That does not validate the latest stage-2 image or an operator's Compose host. Require fresh-commit image CI plus fresh-volume startup, token rejection, UI/API smoke, persistence/recreation and non-root ownership checks. No external deployment was performed. No healthcheck is declared yet; absence of a failing probe is not evidence of readiness. Never use `docker compose down -v` unless intentional permanent data deletion is authorized.
 
 ## What this slice implements
 
 The authoritative runtime summary is `GET /api/v3/status` (owner token required if configured).
 
-- Local SQLite-backed sources, items, read/saved state, named feeds and lexical search; RSS/Atom/JSON input and a read-only ATProto-shaped JSON adapter.
+- Local SQLite-backed sources, items, read/saved state, named feeds and lexical search; RSS/Atom/JSON input and a read-only ATProto-shaped JSON adapter. `GET /api/v3/threads?uri=<DID-based-at://post-URI>` retrieves a bounded public AppView thread graph, preserving reply/root relationships and unavailable-node states. The graph is explicitly partial, not a complete historical thread; it does not authenticate accounts or validate repository signatures.
 - On-demand source refresh and bounded URL fetching. No continuously running full fleet poll scheduler is implied.
-- Deterministic website feed discovery with human approval before subscription; keyword tagging. These are not model-driven agents, AI classification or semantic embeddings.
+- Deterministic website feed discovery with human approval before subscription and baseline keyword tagging. Separately, an explicitly configured OpenAI-compatible provider supports real classification/embedding jobs with consent, persistent provenance and local cosine similarity over compatible provider embeddings; see configuration below. Discovery is not an autonomous model-driven agent.
 - Local drafts and explicit local publishing, with published posts exposed at `/public/feed.json`. This endpoint is intentionally public: any party able to reach the server can read published posts even if owner API authentication is enabled. It does not send posts to ActivityPub or ATProto.
 - Trusted-peer source grants, coordinator-local leases with epochs, credential revocation, cached event replay, authenticated SSE deltas and acknowledgments. `npm run fleet:receive` runs the receiver CLI with `SIDEFEED_COORDINATOR`, `SIDEFEED_PEER_TOKEN`, `SIDEFEED_SOURCE_MAP` (JSON remote-to-existing-local source IDs) and `SIDEFEED_DB`; use HTTPS except on loopback and manually pause mapped local sources to avoid independent polling. See [server configuration and API guide](../../v3/server/README.md) for exact setup and limitations. The receiver persists its cursor and reconnects. A controlled test covers cached SSE delivery to a second node and idempotent replay. These are protocol primitives, not a deployed autonomous multi-node push mesh, quorum failover or a guarantee of globally unique origin polling. Already-in-flight origin requests can overlap failover despite fencing stale results.
-- A local web interface with empty states. An explicit demo API can load labeled fixtures; it does not fetch news or connect to a live federation network.
+- A local web interface with model consent/job/artifact controls and a thread inspector, plus empty states. An explicit demo API can load labeled fixtures; it does not fetch news or connect to a live federation network.
 
 Use only trusted test data while evaluating. Do not infer production readiness, third-party protocol interoperability or measured cheap-host capacity from this first slice.
+
+## Opt-in model setup and limits
+
+Provider configuration is server-side only. The default remains disabled; subscribing or refreshing never calls a model. For a native run, set these before `npm start`:
+
+| Variable | Purpose |
+|---|---|
+| `SIDEFEED_MODEL_ENDPOINT` | HTTPS OpenAI-compatible base URL, no embedded credentials/query |
+| `SIDEFEED_MODEL_KEY` | Provider bearer credential; never send it to the browser |
+| `SIDEFEED_MODEL_PROVIDER` | Identity displayed in consent; default `configured-provider` |
+| `SIDEFEED_CLASSIFICATION_MODEL` | Explicit classification model ID |
+| `SIDEFEED_EMBEDDING_MODEL` | Explicit embedding model ID |
+| `SIDEFEED_MODEL_DAILY_REQUESTS` | Daily reserved request cap, default 20, maximum 1000 |
+
+Each operation requires its model ID. The supplied Compose file does **not** pass these variables through: enabling the provider in containers requires an explicit private override/service-secret configuration. Do not commit credentials or assume a host-shell variable reaches the container automatically.
+
+In the model UI, inspect provider/endpoint and selected content before consenting. Owner `POST /api/v3/models/jobs` accepts `operation` (`classify` or `embed`), 1–5 `itemIds`, `confirm:true` and `consent:{provider:STATUS_PROVIDER,sendContent:true,includePrivate:true}`; private-content export requires the separate `includePrivate` approval. Status, jobs and artifacts are available at `/api/v3/models/status`, `/jobs` and `/artifacts`. The [server guide](../../v3/server/README.md#opt-in-model-provider-fixture-tested) specifies the complete API and retention/provenance behavior.
+
+Limits cover reserved request count, 12,000 input characters per item, 500 requested classification-output tokens, response bytes and deadlines—not a dollar budget or billing guarantee. Jobs persist state/content hashes, requested/actual model identities and returned usage. Cancel aborts transport but cannot recall content or guarantee no charge. Restart fails unfinished work as uncertain; there is no automatic paid retry. Failed/canceled jobs conservatively consume request reservations. Re-submission requires renewed explicit owner action.
+
+`POST /api/v3/models/similar` with `{itemId,limit}` computes local cosine similarity only over real, compatible embeddings; changed-content and incompatible provider/model/dimension artifacts are excluded. No synthetic vector fallback is used. Model text is never executed as a command/tool action. Tests use fixtures; live-provider interoperability, model quality and billing remain unverified.
 
 ## Data safety now
 
@@ -87,10 +108,10 @@ No backup/restore CLI is shipped in this slice. Before valuable use, stop every 
 These remain required product scope; implementation stages do not remove them:
 
 1. Complete and harden feed management: robust parsing/discovery, OPML roundtrip, organization, full lifecycle semantics, scheduling/backoff, retention, authenticated reading and private/public boundaries.
-2. AI classification, embeddings, semantic search and suggestions: durable bounded jobs, model/version provenance, budgets, explicit remote-data consent, local/remote provider profiles, retries and reindexing.
+2. Complete AI workflows beyond the fixture-tested provider jobs: live-provider verification, semantic retrieval/search integration, suggestions, local provider profiles, deliberate reindexing, recovery UX and cost visibility. Existing request/character/token limits are not monetary budgets. Model-generated source suggestions remain required product backlog, not implemented discovery behavior.
 3. Networked readers and trusted fleets: autonomous polling workers, explicit source-sharing consent, normally one lease-authorized poll initiator per cohort, durable push/subscription delivery, gap recovery, failover/partition tests, peer lifecycle and observable queues.
 4. Publishing/microblogging: author/visibility controls, durable outbox, media quotas, edits/deletes, stable identity, delivery status and recovery-safe retries.
 5. Bidirectional ActivityPub: discovery, follow/accept/undo, inbox/outbox, create/update/delete, authenticated signatures, audience enforcement, abuse controls and tested interoperability. Not active in this slice.
-6. ATProto: deliberate reader/discovery integration beyond the JSON adapter, authenticated account/publishing flows, stream/firehose or supported sync strategy, moderation/identity validation and protocol interoperability. Not implemented by accepting ATProto-shaped JSON alone.
+6. ATProto: integration beyond bounded JSON/thread snapshots, authenticated account/publishing flows, stream/firehose or supported sync strategy, moderation/identity validation and protocol interoperability. A public AppView graph is not authenticated sync or complete reply recovery.
 7. Agent discovery/harness: scoped tools, explicit human approval, provenance, budgets, auditable runs, prompt-injection boundaries and safe source/network proposals. Deterministic discovery is an initial tool, not autonomous AI capability.
 8. Operations: verified amd64/arm64 images, CI/browser/security gates, backup/restore and migration drills, controlled multi-node/federation test rigs, resource measurements and an explicitly authorized deployment. Cheap-VPS/home-server sizing remains a target, not a measured guarantee.

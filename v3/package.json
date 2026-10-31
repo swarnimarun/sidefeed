@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node server/index.mjs",
-    "test": "node --test test/*.test.mjs qa/security-unit.mjs qa/integration.mjs",
+    "test": "node --test test/*.test.mjs qa/security-unit.mjs qa/integration.mjs qa/models-security.mjs qa/stage2-integration.mjs web/render.test.mjs",
     "check": "node check.mjs",
     "fleet:receive": "node server/fleet-worker.mjs"
   }
