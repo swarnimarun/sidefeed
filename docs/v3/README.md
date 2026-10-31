@@ -16,7 +16,9 @@ These capabilities are required V3 scope. Milestones sequence the work; they do 
 
 ## Runnable first slice
 
-The new implementation lives in [`v3/`](../../v3/), using Node 24 built-in HTTP/SQLite and a dependency-light web UI. Start with the [run guide](IMPLEMENTATION.md), [verification report](QA.md) and [ATProto/agent/fleet contracts](INTEGRATIONS.md). Forty-nine automated tests pass locally. Opt-in model jobs and partial ATProto thread snapshots are implemented with fixture coverage. [stage-2 CI run](https://github.com/swarnimarun/sidefeed/actions/runs/41207828117) passed at `3fbbbde58b5c97ccd83f62d0fce68973a5cb8f85`: 49 tests, 15 syntax checks, scripted desktop/mobile browser flows and container build/start/token smoke. Desktop reader/thread, mobile reader and fully loaded mobile sources screenshots were reviewed. Live model/provider quality, full social federation and production readiness are not claimed.
+The implementation lives in [`v3/`](../../v3/), using Node 24 built-in HTTP/SQLite and a dependency-light web UI. Start with the [run guide](IMPLEMENTATION.md), [QA evidence](QA.md), [design contract](DESIGN.md) and [integration contracts](INTEGRATIONS.md). The approved Commonplace × Dispatch reading-room design is applied: stacked editorial stories, warm archive surfaces and metadata-based related context, with no invented collections or AI recommendation claims.
+
+[Reading-room CI](https://github.com/swarnimarun/sidefeed/actions/runs/41211874519) passed at `ab40b23b17e948eee63ba6bf6e41e3e6dc151ca4`: 53 tests, 16 syntax checks, browser/protected-token/consent flows, 14 screenshots and container smoke. Desktop reader, compact/expanded mobile and publish views from artifact `13046154447` were reviewed; the final screenshot-wait refinement passed. Real provider quality, full social federation and production readiness are not claimed.
 
 ## Read in this order
 

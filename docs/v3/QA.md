@@ -1,8 +1,8 @@
 # Sidefeed V3 prototype — independent QA
 
-Verified 2026-10-31 at `3fbbbde58b5c97ccd83f62d0fce68973a5cb8f85`: [stage-2 CI run](https://github.com/swarnimarun/sidefeed/actions/runs/41207828117) passed both jobs, including **49 automated tests, 15 syntax checks, scripted desktop/mobile browser flows, and container build/start/token smoke**. This is prototype verification, not complete V3 or production readiness. No live provider/account, external social publication or production deployment was exercised.
+Verified 2026-10-31 at `ab40b23b17e948eee63ba6bf6e41e3e6dc151ca4`: [reading-room CI run](https://github.com/swarnimarun/sidefeed/actions/runs/41211874519) passed both jobs, including **53 automated tests, 16 syntax checks, scripted desktop/mobile browser flows, and container build/start/token smoke**. This is prototype verification, not complete V3 or production readiness. No live provider/account, external social publication or production deployment was exercised.
 
-Fixture screenshots were visually reviewed: desktop reader and partial thread view, mobile reader, and fully loaded mobile sources. The final mobile-source screenshot from artifact `13045221195` confirms the form and source list are rendered. Screenshot review is a limited visual check, not a full accessibility audit.
+The approved Commonplace × Dispatch reading-room design is implemented. The final successful run captured 14 screenshots in artifact `13046154447`. Actual desktop reader, compact mobile reader, expanded mobile context and publish views were visually reviewed and looked correct. The final test-only refinement waits for toast dismissal and captures compact/expanded mobile states separately; runtime code is unchanged. Screenshot inspection is not a full accessibility audit.
 
 ## Exact checks and results
 
@@ -11,9 +11,9 @@ From the repository root:
 ```sh
 cd v3
 npm test
-# PASS: 49 tests (combined backend and independent suites)
+# PASS: 53 tests (combined backend and independent suites)
 npm run check
-# PASS: all server modules, web app and check runner (15 files)
+# PASS: all server modules, web app and check runner (16 files)
 node --check web/app.js
 # PASS
 ```
@@ -41,7 +41,7 @@ Node v24.22.1, built-in HTTP/SQLite; fixture fetchers replace external network. 
 
 ## Stage 2: models, thread identity and fleet privacy
 
-Fifteen additional independent tests and nine backend implementation tests were added; combined total, including six UI/module regressions, is **49 passing tests**. Provider behavior uses injected fixture transports or stubbed HTTPS/DNS sockets, never actual provider calls.
+The combined backend, integration, model/thread, UI and reading-room regression suite has **53 passing tests**. Provider behavior uses injected fixture transports or stubbed HTTPS/DNS sockets, never actual provider calls.
 
 - Disabled configuration, missing confirmation/provider-specific consent, missing private-source consent, unsupported operation, duplicate IDs and nonexistent item IDs cause zero provider calls.
 - Only selected title/content enters provider request. Read/save flags, source identity and credentials are not article payload. Artifacts retain model/provider/input hash provenance; classification does not publish, create drafts, emit fleet events or execute model-suggested tools.
@@ -53,11 +53,17 @@ Fifteen additional independent tests and nine backend implementation tests were 
 
 ## Browser and container evidence
 
-The successful [stage-2 CI run](https://github.com/swarnimarun/sidefeed/actions/runs/41207828117) at `3fbbbde58b5c97ccd83f62d0fce68973a5cb8f85` covers deterministic desktop/mobile interactions: empty state, source creation/fetch, read/save/detail, search, reload persistence, discovery approval cancel/confirm/failure, local publish cancel/confirm, Back/Forward, and responsive overflow checks. Stage-2 assertions cover disabled-model/no-dispatch behavior and a synthetic thread with normal/blocked nodes and an explicit partial-snapshot label. The initial search/navigation race is fixed and the full scripted flow now passes.
+The successful [reading-room CI run](https://github.com/swarnimarun/sidefeed/actions/runs/41211874519) at `ab40b23b17e948eee63ba6bf6e41e3e6dc151ca4` covers deterministic desktop/mobile interactions: empty state, source creation/fetch, read/save/detail, search, reload persistence, discovery approval cancel/confirm/failure, local publish cancel/confirm, Back/Forward, and responsive overflow checks. Stage-2 assertions cover disabled-model/no-dispatch behavior and a synthetic thread with normal/blocked nodes and an explicit partial-snapshot label. The initial search/navigation race is fixed and the full scripted flow now passes.
 
 Module-serving and pure-render regressions verify JavaScript assets are served, unsafe model/thread content is escaped, cyclic/deep thread rendering terminates, disabled controls are explicit and delayed navigation preserves newer search input. Container CI built the image, started it and checked token behavior. It is not a production deployment, cross-architecture qualification or a full backup/restore drill.
 
-The browser suite uses [browser.py](../../v3/qa/browser.py) and [fixture-server.mjs](../../v3/qa/fixture-server.mjs). Fixtures disable model providers and replace external requests. An earlier local browser launch was restricted by its sandbox; authorized remote CI subsequently supplied the browser evidence above. That historical local limitation is no longer a blocker to the reported scripted coverage. Screenshot review is limited to the views explicitly listed above; the loaded mobile sources view is included.
+The browser suite uses [browser.py](../../v3/qa/browser.py) and [fixture-server.mjs](../../v3/qa/fixture-server.mjs). Fixtures disable model providers and replace external requests. An earlier local browser launch was restricted by its sandbox; authorized remote CI subsequently supplied the browser evidence above. That historical local limitation is no longer a blocker to the reported scripted coverage. Current-design screenshot acceptance is limited to the desktop reader, compact/expanded mobile and publish views explicitly reviewed above; other scripted assertions are not a claim of exhaustive visual inspection.
+
+## Reading-room and protected-flow checks
+
+The selected interface replaces dashboard cards with stacked editorial excerpts, linen/ivory surfaces, serif headings and a compact archive. Related entries state their actual same-source/shared-keyword basis; they are not AI recommendations. Responsive context is a closed disclosure until requested. Source details use stored metadata, not invented verification labels.
+
+The successful browser run also exercised a token-protected fixture on port 8800: connect, reload requiring reconnect, disconnect clearing private state, and no token persistence in local/session storage or cookies. Model-consent cancel/confirm and unsaved-draft cancellation passed using fixtures, without an external provider call. These supplement the existing disabled-model, thread, navigation, source and local-publication flows.
 
 ## Remaining verification and product boundaries
 
