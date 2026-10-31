@@ -27,7 +27,7 @@ export function bindWorkspace({state,api,mutate,render,toast,navigate,$}) {
   if(!state.modelStatus.enabled)return;const itemIds=data.getAll('itemIds'),operation=data.get('operation');
   if(!itemIds.length){toast('Select at least one story.');return;}
   const max=state.modelStatus.limits?.maxItems;if(max&&itemIds.length>max){toast(`Select at most ${max} stories for one job.`);return;}
-  if(!state.modelStatus.models?.[operation==='embed'?'embedding':'classification']){toast('No model is configured for this operation.');return;}
+  if(!state.modelStatus.models?.[operation==='embed'?'embedding':operation==='summary'?'summary':'classification']){toast('No model is configured for this operation.');return;}
   const provider=state.modelStatus.provider;if(typeof provider!=='string'||!provider){toast('The server has not reported a provider identity.');return;}
   const titles=itemIds.map(id=>state.items.find(i=>i.id===id)?.title||id),privateIds=itemIds.filter(id=>{const item=state.items.find(i=>i.id===id);return !state.sources.find(s=>s.id===item?.sourceId)?.share;});
   const destination=state.modelStatus.endpoint||state.modelStatus.destination||provider;

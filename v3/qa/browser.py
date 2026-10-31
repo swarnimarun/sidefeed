@@ -21,7 +21,7 @@ def navigate(page, view):
  expect(page).to_have_url(re.compile(r'#'+re.escape(view)+r'$'))
 
 def check_protected_model_flow(browser):
- # Synthetic second node: no screenshots, real secrets, external requests or billing.
+ # Synthetic second node: fixture-labeled screenshots; no real secrets, network or billing.
  token='qa-browser-owner-token-not-a-real-secret'
  headers={'Authorization':'Bearer '+token}
  tab=browser.new_page(viewport={'width':1440,'height':1000})
@@ -56,6 +56,25 @@ def check_protected_model_flow(browser):
  assert len(jobs)==1 and jobs[0]['status']=='succeeded'
  assert jobs[0]['consent']['includePrivate'] is True and len(jobs[0]['itemIds'])==1
  assert tab.request.get('http://127.0.0.1:8800/api/v3/drafts',headers=headers).json()['drafts']==[], 'Model approval unexpectedly published or created drafts'
+ navigate(tab,'search')
+ tab.get_by_label('Your question',exact=True).fill('How do small research groups share knowledge?')
+ tab.locator('#research-form input[name="sourceIds"]').check()
+ tab.once('dialog',lambda d:d.dismiss())
+ tab.get_by_role('button',name='Review & ask library…',exact=True).click()
+ assert tab.request.get('http://127.0.0.1:8800/api/v3/agents/search',headers=headers).json()['jobs']==[], 'Canceled research approval dispatched a job'
+ def approve_research(dialog):
+  assert 'Synthetic QA provider' in dialog.message and 'four model requests' in dialog.message
+  assert 'LOCAL-ONLY CONTENT' in dialog.message
+  dialog.accept()
+ tab.once('dialog',approve_research)
+ tab.get_by_role('button',name='Review & ask library…',exact=True).click()
+ expect(tab.locator('.answer-text')).to_contain_text('Synthetic QA answer',timeout=15000)
+ expect(tab.locator('.answer-citations a')).to_have_count(1)
+ expect(tab.locator('.answer-citations a')).to_have_attribute('href','https://fixture.test/article')
+ tab.get_by_text('Research steps & scope',exact=True).click()
+ expect(tab.locator('.library-answers')).to_contain_text('read_items')
+ capture(tab,'desktop-ask-library-fixture.png')
+ assert tab.request.get('http://127.0.0.1:8800/api/v3/drafts',headers=headers).json()['drafts']==[], 'Research unexpectedly created drafts'
  tab.reload()
  expect(tab.get_by_role('heading',name='Connect to your node',exact=True)).to_be_visible()
  expect(tab.get_by_label('Owner token',exact=True)).to_have_value('')
@@ -68,11 +87,28 @@ def check_protected_model_flow(browser):
  assert not tab_errors,tab_errors
  tab.close()
 
+def check_public_profile_previews(page):
+ navigate(page,'sources')
+ before=page.request.get('http://127.0.0.1:8799/api/v3/sources').json()['sources']
+ for kind,account,sample,filename in [
+  ('atproto','qa.fixture.test','Synthetic AT Protocol profile post','desktop-atproto-preview-fixture.png'),
+  ('activitypub','qa@social.fixture.test','Synthetic ActivityPub public post','desktop-activitypub-preview-fixture.png')]:
+  page.get_by_label('Source type',exact=True).select_option(kind)
+  page.locator('#subscription-input').fill(account)
+  page.get_by_role('button',name='Preview source →',exact=True).click()
+  expect(page.locator('#subscription-preview')).to_contain_text(sample)
+  expect(page.get_by_role('button',name='Subscribe locally',exact=True)).to_be_visible()
+  assert page.request.get('http://127.0.0.1:8799/api/v3/sources').json()['sources']==before, 'Preview changed subscriptions'
+  capture(page,filename)
+  page.get_by_role('button',name='Cancel preview',exact=True).click()
+  expect(page.locator('#subscription-preview')).to_have_count(0)
+ assert page.request.get('http://127.0.0.1:8799/api/v3/sources').json()['sources']==before, 'Cancel changed subscriptions'
+
 with sync_playwright() as p:
  browser=p.chromium.launch(headless=True)
  page=browser.new_page(viewport={'width':1440,'height':1000}); errors=[]; requests=[];page.on('pageerror',lambda e:errors.append(str(e)));page.on('request',lambda r:requests.append((r.method,r.url)))
  page.goto('http://127.0.0.1:8799');expect(page.get_by_role('heading',name='Your reading starts here')).to_be_visible();capture(page,'desktop-empty.png')
- navigate(page,'sources');page.get_by_text('I already have the feed URL',exact=True).click();page.get_by_label('Feed URL',exact=True).fill('https://fixture.test/feed.json');page.get_by_label('Publication name',exact=True).fill('QA source');page.get_by_label('Feed format',exact=True).select_option('json');page.get_by_role('button',name='Subscribe',exact=True).click();expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()
+ navigate(page,'sources');page.get_by_text('Advanced feed discovery & direct feed input',exact=True).click();page.get_by_text('I already have the feed URL',exact=True).click();page.get_by_label('Feed URL',exact=True).fill('https://fixture.test/feed.json');page.get_by_label('Publication name',exact=True).fill('QA source');page.get_by_label('Feed format',exact=True).select_option('json');page.get_by_role('button',name='Subscribe',exact=True).click();expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()
  page.get_by_text('Source controls & fetch history',exact=True).click();page.get_by_role('button',name='Fetch now',exact=True).click();expect(page.locator('#toast')).to_contain_text('Feed fetch completed')
  expect(page.get_by_role('heading',name='Sources',exact=True)).to_be_visible()
  expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()
@@ -89,7 +125,23 @@ with sync_playwright() as p:
  page.get_by_role('button',name='← Back to stories',exact=True).click()
  expect(page.locator('article.story')).to_have_count(3)
  capture(page,'desktop-reader.png')
+ context.get_by_text('Find similar in your library',exact=True).click()
+ context.get_by_role('button',name='Find similar stories',exact=True).click()
+ expect(context.locator('.related-results')).to_contain_text('Shared terms only; not AI')
+ capture(page,'desktop-related-local.png')
+ context.get_by_text('Find similar in your library',exact=True).click()
  navigate(page,'search');page.get_by_label('Search titles, authors and story text',exact=True).fill('not-found-xyz');page.get_by_role('button',name='Search',exact=True).click();expect(page.get_by_role('heading',name='No matching stories')).to_be_visible();expect(page.get_by_label('Search titles, authors and story text',exact=True)).to_have_value('not-found-xyz');capture(page,'desktop-search-empty.png')
+ page.get_by_label('Search titles, authors and story text',exact=True).fill('scinece')
+ page.locator('#search-form').get_by_role('button',name='Search',exact=True).click()
+ expect(page.locator('.search-result-summary')).to_contain_text('science')
+ expect(page.get_by_role('button',name='Science and software fixture',exact=True)).to_be_visible()
+ assert 'scinece' not in page.get_by_role('article',name='Science and software fixture',exact=True).inner_text().lower(), 'Fixture no longer verifies fuzzy result preservation'
+ capture(page,'desktop-search-fuzzy.png')
+ page.get_by_text('Refine your search',exact=True).click()
+ page.get_by_label('Saved state',exact=True).select_option('true')
+ page.locator('#search-form').get_by_role('button',name='Search',exact=True).click()
+ expect(page.locator('article.story')).to_have_count(1)
+ capture(page,'desktop-search-filtered.png')
  navigate(page,'agents');page.get_by_label('Website URL',exact=True).fill('https://fixture.test/website');page.get_by_role('button',name='Discover feeds →').click();expect(page.get_by_text('awaiting_approval',exact=True)).to_be_visible()
  page.get_by_text('Inspect proposal & evidence',exact=True).click()
  expect(page.locator('details[open] > pre.code')).to_be_visible()
@@ -190,7 +242,7 @@ with sync_playwright() as p:
  navigate(page,'inbox')
  expect(page.locator('article.story')).to_have_count(3)
  expect(page.get_by_role('navigation',name='Mobile navigation',exact=True)).to_be_visible()
- navigate(page,'sources');expect(menu).to_have_attribute('aria-expanded','false');expect(page.get_by_role('heading',name='Find a new publication',exact=True)).to_be_visible();expect(page.get_by_label('Website URL',exact=True)).to_be_visible();capture(page,'mobile-sources.png');assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile sources horizontal overflow'
+ navigate(page,'sources');expect(menu).to_have_attribute('aria-expanded','false');expect(page.get_by_role('heading',name='Find a new publication',exact=True)).to_be_visible();expect(page.get_by_label('Feed or website URL',exact=True)).to_be_visible();capture(page,'mobile-sources.png');assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile sources horizontal overflow'
  # Remaining implemented pages, captured after their actual data has rendered.
  page.set_viewport_size({'width':1440,'height':1000})
  navigate(page,'saved')
@@ -204,6 +256,7 @@ with sync_playwright() as p:
  page.get_by_text('Live backend capabilities',exact=True).click()
  expect(page.locator('details[open] > pre.code')).to_contain_text('Sidefeed V3')
  capture(page,'desktop-settings-security.png')
+ check_public_profile_previews(page)
  check_protected_model_flow(browser)
  assert not errors,errors
  print(json.dumps({'result':'PASS','pageerrors':errors,'screenshots':os.listdir(out)}));browser.close()

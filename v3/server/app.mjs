@@ -4,6 +4,9 @@ import {resolve,extname} from 'node:path';
 import {randomUUID,timingSafeEqual} from 'node:crypto';
 import {Store} from './store.mjs';
 import {createModels} from './models.mjs';
+import {createSearch} from './search.mjs';
+import {createAgentSearch} from './agent-search.mjs';
+import {previewSubscription,pollSubscription,pollFailure} from './subscriptions.mjs';
 import {postIdentity} from './threads.mjs';
 import {safeFetch,validUrl} from './fetch.mjs';
 import {parseFeed,discover,classify,hash} from './adapters.mjs';
@@ -11,32 +14,40 @@ const stamp=()=>new Date().toISOString();
 const fail=(status,message,code='invalid_request')=>{throw Object.assign(new Error(message),{status,code});};
 const requireConfirm=b=>{if(b.confirm!==true)fail(400,'Explicit confirmation required');};
 const equal=(a,b)=>a&&b&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
-export function createApp({dbPath=':memory:',fetcher=safeFetch,token='',webRoot=resolve(import.meta.dirname,'../web'),now=Date.now,modelsOptions={}}={}) {
+export function createApp({dbPath=':memory:',fetcher=safeFetch,token='',webRoot=resolve(import.meta.dirname,'../web'),now=Date.now,modelsOptions={},pollingEnabled=false}={}) {
  const store=new Store(dbPath);
  const models=createModels(store,modelsOptions);
+ const search=createSearch(store,{hybridProvider:models.queryCandidates,relatedProvider:models.similar});
+ const agentSearch=createAgentSearch(store,{models,search});
  function readingCounts(){const items=store.all('items');const counts={all:items.length,saved:0,read:0,unread:0,bySource:Object.create(null)};for(const item of items){if(item.saved)counts.saved++;if(item.read)counts.read++;else counts.unread++;if(typeof item.sourceId==='string')counts.bySource[item.sourceId]=(counts.bySource[item.sourceId]||0)+1;}return counts;}
  const required=(kind,id)=>store.get(kind,id)||fail(404,'Not found','not_found');
- const sourceInput=b=>{let url;try{url=validUrl(b.url).href;}catch{fail(400,'A credential-free HTTP(S) URL is required');}const kind=b.kind||'rss';if(!['rss','atom','json','website','atproto'].includes(kind))fail(400,'Unsupported source kind');return {title:String(b.title||new URL(url).hostname).slice(0,300),url,kind,folder:String(b.folder||'').slice(0,100),paused:false,lastFetched:null,error:null};};
- function ingest(source,items,{share=true}={}) {return store.transaction(()=>{let added=0;for(const item of items){const id=hash(source.id+'\0'+item.externalId);const old=store.get('items',id);const value={...item,id,sourceId:source.id,read:old?.read||false,saved:old?.saved||false,tags:classify(item.title+' '+item.content)};store.put('items',value);if(!old)added++;if(share&&source.share&&(!old||hash(old.content+old.title)!==hash(value.content+value.title)))store.event(source.id,{id:randomUUID(),version:1,type:'item.upsert',item:{...value,read:undefined,saved:undefined},at:stamp()});}return added;});}
+ const sourceInput=b=>{let url;try{url=validUrl(b.url).href;}catch{fail(400,'A credential-free HTTP(S) URL is required');}const kind=b.kind||'rss';if(!['rss','atom','json','website','atproto','activitypub'].includes(kind))fail(400,'Unsupported source kind');return {title:String(b.title||new URL(url).hostname).slice(0,300),url,kind,folder:String(b.folder||'').slice(0,100),paused:false,lastFetched:null,error:null};};
+ function ingest(source,items,{share=true,transaction=true}={}) {const operation=()=>{let added=0;for(const item of items){const id=hash(source.id+'\0'+item.externalId);const old=store.get('items',id);const value={...item,id,sourceId:source.id,read:old?.read||false,saved:old?.saved||false,tags:classify(item.title+' '+item.content)};store.put('items',value);if(!old)added++;if(share&&source.share&&(!old||hash(JSON.stringify([old.content,old.title,old.url,old.cid,old.reply,old.state,old.tombstone,old.authorDid,old.authorId]))!==hash(JSON.stringify([value.content,value.title,value.url,value.cid,value.reply,value.state,value.tombstone,value.authorDid,value.authorId]))))store.event(source.id,{id:randomUUID(),version:1,type:'item.upsert',item:{...value,read:undefined,saved:undefined},at:stamp()});}return added;};return transaction?store.transaction(operation):operation();}
+ const refreshing=new Set();
  async function refresh(source){
+  if(refreshing.has(source.id))fail(409,'Refresh already running');
   if(source.paused)fail(409,'Source is paused');
   const lease=store.get('leases',source.id);
   if(source.share&&lease&&lease.expiresAt>now()&&lease.owner!=='local')fail(409,'Trusted peer holds origin lease','lease_held');
   let localLease=null;
   if(source.share)localLease=store.put('leases',{id:source.id,sourceId:source.id,owner:'local',epoch:lease&&lease.owner==='local'&&lease.expiresAt>now()?lease.epoch:(lease?.epoch||0)+1,expiresAt:now()+60000});
+  refreshing.add(source.id);
   try{
-   const result=await fetcher(source.url);
+   const result=source.subscription||['rss','atom','json'].includes(source.kind)?await pollSubscription(source,{fetcher,poll:source.poll||{},now:now()}):await fetcher(source.url);if(result.error)throw Object.assign(new Error(result.error),{poll:result.poll});
    const current=store.get('sources',source.id);
    if(!current||current.paused)fail(409,'Source was removed or paused during fetch');
    if(current.share&&!localLease)fail(409,'Sharing changed during fetch; retry under a lease');
    const active=store.get('leases',source.id);
    if(localLease&&(!active||active.owner!=='local'||active.epoch!==localLease.epoch||active.expiresAt<=now()))fail(409,'Lease changed or expired during fetch');
-   const items=parseFeed(result.body,result.url||current.url,current.kind);
+   const items=result.items||parseFeed(result.body,result.url||current.url,current.kind);
    const added=ingest(current,items);
-   store.put('sources',{...current,lastFetched:stamp(),error:null});return {added,total:items.length};
-  }catch(e){const current=store.get('sources',source.id);if(current)store.put('sources',{...current,error:e.message});throw e;}
+   store.put('sources',{...current,lastFetched:stamp(),poll:result.poll||current.poll,error:null});return {added,total:items.length,notModified:!!result.notModified,warnings:result.warnings||[]};
+  }catch(e){const current=store.get('sources',source.id);if(current)store.put('sources',{...current,error:e.message,poll:e.poll||pollFailure(current.poll||{},e,now())});throw e;}finally{refreshing.delete(source.id);}
  }
 
+ let pollingBusy=false;let stopping=false;
+ const pollTick=async()=>{if(!pollingEnabled||pollingBusy||stopping)return;pollingBusy=true;try{const due=store.all('sources').filter(s=>{const lease=store.get('leases',s.id);return !s.paused&&!refreshing.has(s.id)&&!(s.share&&lease&&lease.expiresAt>now()&&lease.owner!=='local')&&(!s.poll?.nextPollAt||Date.parse(s.poll.nextPollAt)<=now());}).sort((a,b)=>String(a.poll?.nextPollAt||'').localeCompare(String(b.poll?.nextPollAt||''))).slice(0,2);for(const source of due){if(stopping)break;await refresh(source).catch(()=>{});}}finally{pollingBusy=false;}};
+ const pollTimer=pollingEnabled?setInterval(pollTick,60000):null;pollTimer?.unref();
  async function route(req,res){
  const u=new URL(req.url,'http://localhost');const p=u.pathname.replace(/\/$/,'');
  const write=!['GET','HEAD'].includes(req.method);
@@ -51,6 +62,14 @@ export function createApp({dbPath=':memory:',fetcher=safeFetch,token='',webRoot=
  const send=(data,status=200)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(data));};
  const method=req.method;
  let m;
+ if(p==='/api/v3/subscriptions/preview'&&method==='POST'){for(const old of store.all('subscriptionPreviews'))if(old.expiresAt<=now()||old.used)store.delete('subscriptionPreviews',old.id);if(store.all('subscriptionPreviews').length>=50)fail(429,'Too many pending previews; wait for expiry');const preview=await previewSubscription(b,{fetcher,now:now()});if(preview.error)fail(502,preview.error);return send(store.create('subscriptionPreviews',{...preview,expiresAt:now()+600000,used:false}),201);}
+ if(p==='/api/v3/subscriptions'&&method==='POST'){requireConfirm(b);const preview=required('subscriptionPreviews',b.previewId);if(preview.used||preview.expiresAt<=now())fail(409,'Preview expired or already used');if(store.all('sources').some(s=>s.url===preview.source.url))fail(409,'Source already exists');const committed=store.transaction(()=>{const source=store.create('sources',{...sourceInput(preview.source),subscription:preview.source.subscription,poll:preview.poll,lastFetched:stamp()});const added=ingest(source,preview.items,{transaction:false});store.put('subscriptionPreviews',{id:preview.id,expiresAt:preview.expiresAt,used:true,sourceId:source.id});return {source,added,warnings:preview.warnings||[]};});return send(committed,201);}
+ if(p==='/api/v3/search'&&method==='GET'){if(u.searchParams.get('mode')==='hybrid')fail(400,'Hybrid search requires POST with explicit query consent');return send(await search.search(Object.fromEntries(u.searchParams)));}
+ if(p==='/api/v3/search'&&method==='POST')return send(await search.search(b));
+ if((m=p.match(/^\/api\/v3\/items\/([^/]+)\/similar$/))&&method==='GET')return send(await search.similar(m[1],Object.fromEntries(u.searchParams)));
+ if(p==='/api/v3/agents/search'&&method==='POST')return send(agentSearch.submit(b),202);
+ if(p==='/api/v3/agents/search'&&method==='GET')return send({jobs:store.all('modelJobs').filter(j=>j.operation==='agent_search')});
+ if((m=p.match(/^\/api\/v3\/agents\/search\/([^/]+)\/cancel$/))&&method==='POST')return send(models.cancel(m[1]));
  if(p==='/api/v3/models/status'&&method==='GET')return send(models.status());
  if(p==='/api/v3/models/jobs'&&method==='GET')return send({jobs:store.all('modelJobs')});
  if(p==='/api/v3/models/jobs'&&method==='POST')return send(models.submit(b),202);
@@ -58,9 +77,9 @@ export function createApp({dbPath=':memory:',fetcher=safeFetch,token='',webRoot=
  if(p==='/api/v3/models/artifacts'&&method==='GET')return send({artifacts:store.all('modelArtifacts')});
  if(p==='/api/v3/models/similar'&&method==='POST')return send(models.similar(b));
  if(p==='/api/v3/threads'&&method==='GET'){const {threadUrl,normalizeThread}=await import('./threads.mjs');const url=threadUrl(u.searchParams.get('uri'));const result=await fetcher(url);const graph=normalizeThread(JSON.parse(result.body));store.put('threads',{id:hash(graph.rootUri),...graph,fetchedAt:stamp()});return send(graph);}
- if(p==='/api/v3/status')return send({name:'Sidefeed V3',version:'0.1.0',mode:'local prototype',capabilities:{reader:true,sourceManagement:true,search:'lexical',agents:'deterministic discovery; human approval',fleet:'trusted coordinator leases + cached event replay',publishing:'local only',activitypub:false,atproto:'read-only JSON adapter; no firehose or authenticated publishing',ai:models.status().enabled?'opt-in provider classification/embeddings; per-request consent':'keyword tags; model provider disabled'},readingCounts:readingCounts(),counts:{sources:store.all('sources').length,items:store.all('items').length}});
+ if(p==='/api/v3/status')return send({name:'Sidefeed V3',version:'0.1.0',mode:'local prototype',capabilities:{reader:true,sourceManagement:true,search:'FTS5 ranked lexical/fuzzy; opt-in query-embedding hybrid',agents:'bounded local-library search/read/cited summary; deterministic website discovery',fleet:'trusted coordinator leases + cached event replay',publishing:'local only',activitypub:'public actor/outbox pull subscriptions; no federation Follow',atproto:'public profile subscriptions and bounded threads; no authenticated publishing',polling:pollingEnabled?'enabled: bounded periodic source refresh':'disabled: manual refresh only',ai:models.status().enabled?'opt-in provider classification/embeddings; per-request consent':'keyword tags; model provider disabled'},readingCounts:readingCounts(),counts:{sources:store.all('sources').length,items:store.all('items').length}});
  if(p==='/api/v3/sources'&&method==='GET')return send({sources:store.all('sources')});
- if(p==='/api/v3/sources'&&method==='POST'){const input=sourceInput(b);if(store.all('sources').some(s=>s.url===input.url))fail(409,'Source already exists');return send(store.create('sources',input),201);}
+ if(p==='/api/v3/sources'&&method==='POST'){if(b.kind==='activitypub')fail(400,'ActivityPub profiles require subscription preview and confirmation');const input=sourceInput(b);if(store.all('sources').some(s=>s.url===input.url))fail(409,'Source already exists');return send(store.create('sources',input),201);}
  if((m=p.match(/^\/api\/v3\/sources\/([^/]+)(\/refresh)?$/))){const s=required('sources',m[1]);if(m[2]&&method==='POST')return send(await refresh(s));if(method==='DELETE'){store.transaction(()=>{store.delete('sources',s.id);for(const item of store.all('items').filter(i=>i.sourceId===s.id))store.delete('items',item.id);store.delete('leases',s.id);});return send({deleted:true});}if(method==='PATCH'){const update={...s};for(const key of ['title','folder'])if(typeof b[key]==='string')update[key]=b[key].slice(0,300);for(const key of ['paused','share'])if(typeof b[key]==='boolean')update[key]=b[key];return send(store.put('sources',update));}}
  if(p==='/api/v3/items'&&method==='GET'){let items=store.all('items');for(const [key,val] of u.searchParams){if(key==='sourceId')items=items.filter(i=>i.sourceId===val);if(key==='saved'&&val==='true')items=items.filter(i=>i.saved);if(key==='unread'&&val==='true')items=items.filter(i=>!i.read);if(key==='read'&&val==='true')items=items.filter(i=>i.read);if(key==='q')items=items.filter(i=>(i.title+' '+i.content+' '+(i.author||'')).toLowerCase().includes(val.toLowerCase()));}items.sort((a,b)=>String(b.publishedAt||'').localeCompare(String(a.publishedAt||''))||a.id.localeCompare(b.id));return send({items:items.slice(0,1000)});}
  if((m=p.match(/^\/api\/v3\/items\/([^/]+)$/))&&method==='PATCH'){const item=required('items',m[1]);for(const k of ['read','saved'])if(typeof b[k]==='boolean')item[k]=b[k];return send(store.put('items',item));}
@@ -86,9 +105,9 @@ export function createApp({dbPath=':memory:',fetcher=safeFetch,token='',webRoot=
  if(p==='/public/feed.json'&&method==='GET')return send({version:'https://jsonfeed.org/version/1.1',title:'Sidefeed local posts',items:store.all('drafts').filter(d=>d.status==='published').map(d=>({id:d.id,title:d.title,content_text:d.content,date_published:d.publishedAt}))});
  if(p.startsWith('/api/'))fail(404,'Unknown API route','not_found');
  if(method!=='GET'&&method!=='HEAD')fail(405,'Method not allowed');
- const file=p===''||p==='/'?'index.html':p.slice(1);if(!['index.html','app.js','api.js','state.js','router.js','reading-context.js','components/html.js','components/shell.js','components/thread.js','components/models.js','pages/reader.js','pages/workspace.js','actions/workspace.js','styles.css','favicon.svg'].includes(file))fail(404,'Not found');let content;try{content=await readFile(resolve(webRoot,file));}catch{fail(404,'UI asset not found');}res.writeHead(200,{'content-type':({'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'})[extname(file)],'content-security-policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",'x-content-type-options':'nosniff'});res.end(content);
+ const file=p===''||p==='/'?'index.html':p.slice(1);if(!['index.html','app.js','api.js','state.js','router.js','reading-context.js','components/html.js','components/shell.js','components/thread.js','components/models.js','pages/reader.js','pages/workspace.js','pages/search.js','actions/search.js','pages/subscriptions.js','actions/subscriptions.js','actions/workspace.js','styles.css','favicon.svg'].includes(file))fail(404,'Not found');let content;try{content=await readFile(resolve(webRoot,file));}catch{fail(404,'UI asset not found');}res.writeHead(200,{'content-type':({'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'})[extname(file)],'content-security-policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",'x-content-type-options':'nosniff'});res.end(content);
  }
  const server=http.createServer((req,res)=>route(req,res).catch(e=>{if(!res.headersSent){res.writeHead(e.status||502,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({error:{code:e.code||'operation_failed',message:e.message}}));}else res.end();}));
  server.requestTimeout=15000;server.headersTimeout=10000;
- return {server,store,refresh,close:async()=>{await models.close();await new Promise(resolve=>server.close(()=>{store.close();resolve();}));}};
+ return {server,store,refresh,pollOnce:pollTick,close:async()=>{stopping=true;if(pollTimer)clearInterval(pollTimer);while(pollingBusy)await new Promise(r=>setTimeout(r,10));await models.close();await new Promise(resolve=>server.close(()=>{store.close();resolve();}));}};
 }

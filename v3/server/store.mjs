@@ -1,7 +1,8 @@
 import {DatabaseSync} from 'node:sqlite';
 import {randomUUID} from 'node:crypto';
+import {initializeSearch} from './search.mjs';
 export class Store {
- constructor(path=':memory:'){this.db=new DatabaseSync(path);this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS records (kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, sourceId TEXT NOT NULL, data TEXT NOT NULL); PRAGMA user_version=1;');}
+ constructor(path=':memory:'){this.db=new DatabaseSync(path);this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS records (kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, sourceId TEXT NOT NULL, data TEXT NOT NULL);'); if(Number(this.db.prepare('PRAGMA user_version').get().user_version)<1)this.db.exec('PRAGMA user_version=1'); initializeSearch(this.db);}
  all(k){return this.db.prepare('SELECT data FROM records WHERE kind=?').all(k).map(r=>JSON.parse(r.data));}
  get(k,id){const r=this.db.prepare('SELECT data FROM records WHERE kind=? AND id=?').get(k,id);return r?JSON.parse(r.data):null;}
  put(k,v){this.db.prepare('INSERT INTO records VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data').run(k,v.id,JSON.stringify(v));return v;}

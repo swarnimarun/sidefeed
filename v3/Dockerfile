@@ -6,7 +6,7 @@ ENV NODE_ENV=production \
     SIDEFEED_DB=/data/sidefeed.sqlite
 
 WORKDIR /app
-# The application uses Node built-ins only; no dependency installation is needed.
+# Runtime code and the pinned XML parser are bundled; no dependency installation is needed.
 COPY --chown=node:node package.json ./
 COPY --chown=node:node server ./server
 COPY --chown=node:node web ./web

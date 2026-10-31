@@ -1,0 +1,40 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {DatabaseSync} from 'node:sqlite';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {Store} from '../server/store.mjs';
+import {createSearch,compileQuery} from '../server/search.mjs';
+const item=(id,title,more={})=>({id,title,content:'',sourceId:'rss',publishedAt:'2026-01-01T00:00:00.000Z',read:false,saved:false,...more});
+test('FTS migration preserves old records and future user_version across restart',async()=>{const dir=mkdtempSync(join(tmpdir(),'search-')),path=join(dir,'db');try{let db=new DatabaseSync(path);db.exec('CREATE TABLE records(kind TEXT,id TEXT,data TEXT,PRIMARY KEY(kind,id)); PRAGMA user_version=7;');db.prepare('INSERT INTO records VALUES(?,?,?)').run('items','old',JSON.stringify(item('old','Existing café')));db.close();for(let i=0;i<2;i++){const s=new Store(path);assert.equal(s.db.prepare('PRAGMA user_version').get().user_version,7);assert.equal((await createSearch(s).search({q:'café'})).total,1);assert.equal(s.all('items').length,1);s.close();}}finally{rmSync(dir,{recursive:true,force:true});}});
+test('all item upsert paths, deletes and source kind changes keep indexes current',async()=>{const s=new Store(),search=createSearch(s);s.put('sources',{id:'rss',kind:'rss'});s.transaction(()=>s.put('items',item('a','initial')));assert.equal((await search.search({q:'initial',protocol:'rss'})).total,1);s.put('items',item('a','updated',{saved:true}));assert.equal((await search.search({q:'initial'})).total,0);assert.equal((await search.search({q:'updated',saved:true})).total,1);s.put('sources',{id:'rss',kind:'activitypub'});assert.equal((await search.search({protocol:'activitypub'})).total,1);s.delete('items','a');assert.equal((await search.search({q:'updated'})).total,0);s.close();});
+test('phrases, unicode and weighted title/content/author ranking',async()=>{const s=new Store(),search=createSearch(s);s.put('items',item('title','quantum computer',{content:'naïve café 東京'}));s.put('items',item('body','some title',{content:'quantum computer'}));s.put('items',item('far','other',{content:'quantum faster computer',author:'Ada Lovelace'}));let r=await search.search({q:'"quantum computer"'});assert.equal(r.total,2);assert.equal(r.items[0].id,'title');assert.equal((await search.search({q:'cafe 東京'})).total,1);assert.equal((await search.search({q:'"Ada Lovelace"'})).items[0].id,'far');s.close();});
+test('fuzzy spelling correction is bounded and explicitly lexical',async()=>{const s=new Store(),search=createSearch(s);s.put('items',item('a','subscription feeds'));let r=await search.search({q:'subscrption'});assert.equal(r.total,1);assert.deepEqual(r.corrections,[{from:'subscrption',to:'subscription'}]);assert.equal(r.method,'lexical');assert.equal(r.fuzzyCandidateLimit,256);assert.equal((await search.search({q:'subscrption',fuzzy:false})).total,0);s.close();});
+test('query compiler treats operators/punctuation as text and rejects oversized inputs',async()=>{const s=new Store(),search=createSearch(s);s.put('items',item('a','ordinary'));for(const q of ['"',"' OR 1=1; DROP TABLE records;--",'NEAR(a,b)','title:ordinary*','"unterminated'])await search.search({q});assert.equal(s.all('items').length,1);assert.equal(compileQuery('"hello world" foo').match,'"hello world" AND "foo"');assert.throws(()=>compileQuery('a'.repeat(1001)));await assert.rejects(search.search({limit:101}));await assert.rejects(search.search({offset:-1}));await assert.rejects(search.search({read:'1'}));await assert.rejects(search.search({after:'invalid'}));s.close();});
+test('filters and stable pagination',async()=>{const s=new Store(),search=createSearch(s);s.put('sources',{id:'rss',kind:'rss'});for(let i=0;i<6;i++)s.put('items',item(String(i),'news',{read:i%2===0,saved:i>2}));const a=await search.search({q:'news',limit:2}),b=await search.search({q:'news',limit:2,offset:2});assert.deepEqual(a.items.map(x=>x.id),['0','1']);assert.deepEqual(b.items.map(x=>x.id),['2','3']);assert.equal(a.total,6);assert.equal(a.hasMore,true);assert.equal((await search.search({q:'news',read:false,saved:true,protocol:'rss',sourceId:'rss',after:'2025-12-31',before:'2026-01-02'})).total,2);assert.equal((await search.search({before:'2025-01-01'})).total,0);s.close();});
+test('similar uses shared terms, excludes seed, supports pagination and no AI claim',async()=>{const s=new Store(),search=createSearch(s);for(let i=0;i<5;i++)s.put('items',item(String(i),'shared topic'));const r=await search.similar('0',{limit:2,offset:1});assert.equal(r.total,4);assert.equal(r.items.length,2);assert.ok(r.items.every(x=>x.id!=='0'));assert.equal(r.offset,1);assert.match(r.reason,/not AI/);s.close();});
+test('hybrid requires consent and provenance, filters candidates and never invents IDs',async()=>{const s=new Store();s.put('items',item('a','coffee',{saved:true}));s.put('items',item('b','tea'));let calls=0;const search=createSearch(s,{hybridProvider:async()=>{calls++;return {candidates:[{id:'b',score:.9},{id:'a',score:.8},{id:'invented',score:1}],provenance:{provider:'fixture',model:'embedding-fixture',dimensions:3,endpoint:'local'}};}});await assert.rejects(search.search({q:'coffee',mode:'hybrid'}));assert.equal(calls,0);const r=await search.search({q:'coffee',mode:'hybrid',saved:true,consent:{confirm:true,sendQuery:true,provider:'fixture'}});assert.equal(r.method,'hybrid');assert.equal(r.total,1);assert.equal(r.items[0].id,'a');assert.equal(r.provenance.dimensions,3);assert.equal(r.candidateLimited,true);await assert.rejects(createSearch(s).search({q:'x',mode:'hybrid'}),/No embedding/);s.close();});
+
+test('SQL writes and rolled back transactions cannot leave stale FTS entries',async()=>{const s=new Store(),search=createSearch(s);s.db.prepare('INSERT INTO records VALUES(?,?,?)').run('items','direct',JSON.stringify(item('direct','direct ingestion')));assert.equal((await search.search({q:'ingestion'})).total,1);assert.throws(()=>s.transaction(()=>{s.put('items',item('direct','rolled back'));throw new Error('rollback');}));assert.equal((await search.search({q:'ingestion'})).total,1);assert.equal((await search.search({q:'rolled'})).total,0);s.db.prepare('DELETE FROM records WHERE kind=? AND id=?').run('items','direct');assert.equal((await search.search({q:'ingestion'})).total,0);s.close();});
+test('indexed fuzzy handles leading typos and transpositions without short-word or off-topic floods',async()=>{
+ const s=new Store(),search=createSearch(s);
+ s.put('items',item('a','subscription reader café naïveté'));
+ for(const q of ['xubscription','subscrpition','raeder','xafé','naïvteé']){
+  const r=await search.search({q});assert.equal(r.items[0]?.id,'a',q);assert.equal(r.method,'lexical');assert.equal(r.fuzzyCandidateLimit,256);
+ }
+ s.put('items',item('b','cat dog code'));
+ assert.equal((await search.search({q:'bat'})).total,0);
+ assert.equal((await search.search({q:'volcanology'})).total,0);
+ s.delete('items','a');assert.equal(s.db.prepare("SELECT count(*) AS n FROM search_terms WHERE term='subscription'").get().n,0);
+ assert.equal((await search.search({q:'xubscription'})).total,0);
+ s.close();
+});
+test('stored-vector related hook retains provenance, filters and lexical fallback',async()=>{
+ const s=new Store();s.put('items',item('seed','shared topic'));s.put('items',item('a','shared topic',{saved:true}));s.put('items',item('b','different words'));
+ const search=createSearch(s,{relatedProvider:()=>({items:[{item:{id:'b'},score:.9},{item:{id:'a'},score:.5}],provenance:{provider:'fixture',model:'real-fixture',dimensions:2}})});
+ const r=await search.similar('seed',{saved:true});assert.equal(r.method,'hybrid-related');assert.deepEqual(r.items.map(i=>i.id),['a']);assert.equal(r.provenance.provider,'fixture');
+ const fallback=await createSearch(s,{relatedProvider:()=>{throw Object.assign(new Error('no vectors'),{status:409});}}).similar('seed');
+ assert.equal(fallback.method,'lexical');assert.ok(!fallback.provenance);
+ s.close();
+});
