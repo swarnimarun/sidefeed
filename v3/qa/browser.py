@@ -20,6 +20,16 @@ def navigate(page, view):
  anchors.first.click()
  expect(page).to_have_url(re.compile(r'#'+re.escape(view)+r'$'))
 
+def open_advanced_source(page):
+ # Discovery and direct entry are deliberately behind progressive disclosure.
+ # Each mutation re-renders the workspace, so re-open through the actual UI.
+ disclosure=page.locator('details.advanced-source')
+ expect(disclosure).to_be_visible()
+ if disclosure.get_attribute('open') is None:
+  disclosure.locator(':scope > summary').click()
+ expect(disclosure).to_have_attribute('open','')
+ expect(page.get_by_label('Website URL',exact=True)).to_be_visible()
+
 def check_protected_model_flow(browser):
  # Synthetic second node: fixture-labeled screenshots; no real secrets, network or billing.
  token='qa-browser-owner-token-not-a-real-secret'
@@ -94,8 +104,10 @@ def check_public_profile_previews(page):
   ('atproto','qa.fixture.test','Synthetic AT Protocol profile post','desktop-atproto-preview-fixture.png'),
   ('activitypub','qa@social.fixture.test','Synthetic ActivityPub public post','desktop-activitypub-preview-fixture.png')]:
   page.get_by_label('Source type',exact=True).select_option(kind)
+  expect(page.get_by_label('AT Protocol account' if kind=='atproto' else 'ActivityPub account',exact=True)).to_be_visible()
   page.locator('#subscription-input').fill(account)
   page.get_by_role('button',name='Preview source →',exact=True).click()
+  expect(page.locator('#subscription-preview')).to_be_visible()
   expect(page.locator('#subscription-preview')).to_contain_text(sample)
   expect(page.get_by_role('button',name='Subscribe locally',exact=True)).to_be_visible()
   assert page.request.get('http://127.0.0.1:8799/api/v3/sources').json()['sources']==before, 'Preview changed subscriptions'
@@ -108,7 +120,7 @@ with sync_playwright() as p:
  browser=p.chromium.launch(headless=True)
  page=browser.new_page(viewport={'width':1440,'height':1000}); errors=[]; requests=[];page.on('pageerror',lambda e:errors.append(str(e)));page.on('request',lambda r:requests.append((r.method,r.url)))
  page.goto('http://127.0.0.1:8799');expect(page.get_by_role('heading',name='Your reading starts here')).to_be_visible();capture(page,'desktop-empty.png')
- navigate(page,'sources');page.get_by_text('Advanced feed discovery & direct feed input',exact=True).click();page.get_by_text('I already have the feed URL',exact=True).click();page.get_by_label('Feed URL',exact=True).fill('https://fixture.test/feed.json');page.get_by_label('Publication name',exact=True).fill('QA source');page.get_by_label('Feed format',exact=True).select_option('json');page.get_by_role('button',name='Subscribe',exact=True).click();expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()
+ navigate(page,'sources');open_advanced_source(page);page.get_by_text('I already have the feed URL',exact=True).click();page.get_by_label('Feed URL',exact=True).fill('https://fixture.test/feed.json');page.get_by_label('Publication name',exact=True).fill('QA source');page.get_by_label('Feed format',exact=True).select_option('json');page.get_by_role('button',name='Subscribe',exact=True).click();expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()
  page.get_by_text('Source controls & fetch history',exact=True).click();page.get_by_role('button',name='Fetch now',exact=True).click();expect(page.locator('#toast')).to_contain_text('Feed fetch completed')
  expect(page.get_by_role('heading',name='Sources',exact=True)).to_be_visible()
  expect(page.get_by_role('heading',name='Your publications 1',exact=True)).to_be_visible()
@@ -127,6 +139,7 @@ with sync_playwright() as p:
  capture(page,'desktop-reader.png')
  context.get_by_text('Find similar in your library',exact=True).click()
  context.get_by_role('button',name='Find similar stories',exact=True).click()
+ expect(context.locator('.related-results')).to_be_visible()
  expect(context.locator('.related-results')).to_contain_text('Shared terms only; not AI')
  capture(page,'desktop-related-local.png')
  context.get_by_text('Find similar in your library',exact=True).click()
@@ -142,13 +155,14 @@ with sync_playwright() as p:
  page.locator('#search-form').get_by_role('button',name='Search',exact=True).click()
  expect(page.locator('article.story')).to_have_count(1)
  capture(page,'desktop-search-filtered.png')
- navigate(page,'agents');page.get_by_label('Website URL',exact=True).fill('https://fixture.test/website');page.get_by_role('button',name='Discover feeds →').click();expect(page.get_by_text('awaiting_approval',exact=True)).to_be_visible()
+ navigate(page,'agents');open_advanced_source(page);page.get_by_label('Website URL',exact=True).fill('https://fixture.test/website');page.get_by_role('button',name='Discover feeds →').click();expect(page.get_by_text('awaiting_approval',exact=True)).to_be_visible()
  page.get_by_text('Inspect proposal & evidence',exact=True).click()
  expect(page.locator('details[open] > pre.code')).to_be_visible()
  expect(page.locator('details[open] > pre.code')).to_contain_text('fetch_public_url')
  expect(page.get_by_role('button',name='Approve subscription',exact=True)).to_be_visible()
  capture(page,'desktop-agent-approval.png')
  page.once('dialog',lambda d:d.dismiss());page.get_by_role('button',name='Approve subscription').click();expect(page.get_by_text('awaiting_approval',exact=True)).to_be_visible();page.once('dialog',lambda d:d.accept());page.get_by_role('button',name='Approve subscription').click();expect(page.get_by_text('approved',exact=True)).to_be_visible()
+ open_advanced_source(page)
  page.get_by_label('Website URL',exact=True).fill('https://fixture.test/error');page.get_by_role('button',name='Discover feeds →').click();expect(page.get_by_text('failed',exact=True)).to_be_visible();expect(page.get_by_text('Deterministic fixture origin failure',exact=True)).to_be_visible()
  navigate(page,'compose');page.get_by_label('Title',exact=True).fill('QA private draft');page.get_by_label('Your words',exact=True).fill('Only publish after confirmation');page.get_by_role('button',name='Save private draft').click();expect(page.get_by_text('draft',exact=True)).to_be_visible()
  expect(page.get_by_text('QA private draft',exact=True)).to_be_visible()
